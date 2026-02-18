@@ -77,15 +77,28 @@ async def login_automatizado(email: str):
             )
             page = await context.new_page()
 
-            # --- PASSO 1: SOLICITAR E-MAIL ---
+           # --- PASSO 1: SOLICITAR E-MAIL ---
             print(f"🤖 BOT: Acessando Paciente 360 para {email}")
-            await page.goto("https://auth.paciente360.com.br/login/email", wait_until="networkidle", timeout=60000)
+            # Tentamos carregar a página e esperar até que não haja mais atividade de rede
+            await page.goto("https://auth.paciente360.com.br/login/email", wait_until="domcontentloaded", timeout=60000)
             
-            await page.wait_for_selector('input[type="email"]', timeout=15000)
-            await page.fill('input[type="email"]', email)
+            # Pequena pausa para garantir que os scripts de carregamento rodaram
+            await asyncio.sleep(5)
+
+            # Seletor ultra-abrangente: busca qualquer input que pareça um campo de texto ou email
+            try:
+                print("🔍 BOT: Procurando campo de entrada...")
+                campo_email = page.locator('input[type="email"], input[name*="email" i], input[placeholder*="email" i], input').first
+                await campo_email.wait_for(state="visible", timeout=15000)
+                await campo_email.fill(email)
+                print("✅ BOT: Campo de e-mail preenchido.")
+            except Exception as e:
+                # Se falhar, tira um "print" do HTML para o log (ajuda muito a debugar)
+                print(f"❌ BOT: Não achei o campo. O que estou vendo: {await page.content()[:500]}...")
+                raise Exception("Campo de e-mail não encontrado na página.")
             
-            # Clica no botão de enviar (usando múltiplos seletores possíveis)
-            btn_enviar = page.locator('button[type="submit"], button:has-text("Receber"), button:has-text("Continuar")').first
+            # Clica no botão (geralmente o único botão de destaque na página de login)
+            btn_enviar = page.locator('button[type="submit"], button:has-text("Receber"), button:has-text("Continuar"), button:has-text("Enviar")').first
             await btn_enviar.click()
             
             print("⏳ BOT: E-mail solicitado. Aguardando OTP no Redis...")
