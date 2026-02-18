@@ -146,22 +146,35 @@ async def login_automatizado(email: str):
 def gerar_html_redirecionamento(cookies):
     js_cookies = ""
     for c in cookies:
-        js_cookies += f"document.cookie = '{c['name']}={c['value']}; domain=.paciente360.com.br; path=/; Secure; SameSite=None';\n"
+        # Adicionamos o 'SameSite=None' e 'Secure' para evitar bloqueios de navegadores
+        js_cookies += f"document.cookie = '{c['name']}={c['value']}; domain=.paciente360.com.br; path=/; Max-Age=3600; Secure; SameSite=None';\n"
     
     return HTMLResponse(content=f"""
     <html>
-        <head><meta charset="UTF-8"><title>Redirecionando...</title></head>
+        <head><meta charset="UTF-8"><title>Sincronizando...</title></head>
         <body style="font-family: sans-serif; text-align: center; padding-top: 100px; background: #f4f4f9;">
             <div style="max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                <h2 style="color: #2d3748;">¡Autenticación Exitosa!</h2>
-                <p style="color: #4a5568;">Sincronizando sesión segura...</p>
+                <h2 style="color: #2d3748;">¡Autenticação Concluída!</h2>
+                <p style="color: #4a5568;">Sincronizando cookies de sessão...</p>
                 <div style="margin: 20px 0;"><img src="https://i.gifer.com/ZZ5H.gif" width="50"></div>
             </div>
             <script>
+                // 1. Limpa cookies antigos para evitar conflito
+                const cookiesAntigos = document.cookie.split(";");
+                for (let i = 0; i < cookiesAntigos.length; i++) {{
+                    const cookie = cookiesAntigos[i];
+                    const eqPos = cookie.indexOf("=");
+                    const name = eqPos > -1 ? cookie.substr(0, eqPos) : cookie;
+                    document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT; domain=.paciente360.com.br; path=/";
+                }}
+
+                // 2. Injeta os novos cookies
                 {js_cookies}
+
+                // 3. Redireciona
                 setTimeout(() => {{
                     window.location.href = "https://app.paciente360.com.br/dashboard";
-                }}, 2000);
+                }}, 1500);
             </script>
         </body>
     </html>
