@@ -35,4 +35,4 @@ RUN playwright install chromium --with-deps
 COPY . .
 
 # Comando para rodar a API (ajuste o nome do arquivo se não for main.py)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "main-otp:app", "--host", "0.0.0.0", "--port", "8080"]
