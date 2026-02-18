@@ -27,21 +27,45 @@ def home():
 @app.post("/webhook-sendgrid")
 async def webhook(request: Request):
     try:
-        events = await request.json()
+        data = await request.json()
+        # O SendGrid pode enviar um evento único ou uma lista
+        events = data if isinstance(data, list) else [data]
+        
         for event in events:
-            email = event.get("email", "").lower()
-            if not email.endswith(DOMINIO_PERMITIDO): continue
+            # 1. Tenta pegar o email do campo principal ou de dentro do dynamic_template_data
+            email = event.get("email") or event.get("to")
+            template_data = event.get("dynamic_template_data", {})
             
-            body = event.get("body", "")
-            match = re.search(r'\b\d{6}\b', body)
-            otp = event.get("otp_code") or (match.group(0) if match else None)
+            if not email and template_data:
+                email = template_data.get("email")
+
+            if not email:
+                continue
+                
+            email = email.lower().strip()
+            if not email.endswith(DOMINIO_PERMITIDO):
+                continue
+
+            # 2. CAPTURA O OTP (Ajustado para o seu JSON)
+            # Primeiro tenta 'code_otp' dentro de 'dynamic_template_data'
+            otp = template_data.get("code_otp")
             
+            # Fallback: Se não achar, tenta o Regex no corpo como garantia
+            if not otp:
+                body = event.get("body", "")
+                match = re.search(r'\b\d{6}\b', str(body))
+                otp = match.group(0) if match else None
+
             if email and otp:
-                r.set(f"otp:{email}", otp, ex=120)
-                print(f"DEBUG: OTP {otp} capturado para {email}")
+                # Salva no Redis com a chave minúscula
+                r.set(f"otp:{email}", str(otp), ex=180)
+                print(f"✅ SUCESSO: OTP {otp} capturado via dynamic_template_data para {email}")
+            else:
+                print(f"⚠️ AVISO: Evento recebido para {email}, mas 'code_otp' não encontrado.")
+
         return {"status": "received"}
     except Exception as e:
-        print(f"ERRO WEBHOOK: {e}")
+        print(f"ERRO CRÍTICO WEBHOOK: {e}")
         return {"status": "error"}
 
 @app.get("/login-automatizado")
