@@ -61,23 +61,19 @@ async def login_automatizado(email: str):
     email = email.lower()
     if not email.endswith(DOMINIO_PERMITIDO):
         raise HTTPException(status_code=403, detail="Domínio não autorizado")
-
-    # MUDANÇA AQUI: Detecta o caminho do Chromium no Railway
-    # O Railway geralmente instala em /usr/bin/chromium ou /usr/bin/google-chrome
     chrome_executable = os.getenv("CHROME_PATH", "/usr/bin/chromium")
 
     async with async_playwright() as p:
         try:
-            # Lançamento com caminho explícito para evitar erro "Executable doesn't exist"
+            # O Railway vai encontrar o browser aqui se PLAYWRIGHT_BROWSERS_PATH=1
             browser = await p.chromium.launch(
                 headless=True, 
-                executable_path=chrome_executable,
-                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+                args=['--no-sandbox', '--disable-setuid-sandbox']
             )
-        except Exception as launch_error:
-            # Fallback caso o caminho acima falhe (tenta o padrão do sistema)
-            print(f"Aviso: Falha ao carregar chromium em {chrome_executable}. Tentando automático...")
-            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+            print("DEBUG: Browser lançado com sucesso!")
+        except Exception as e:
+            print(f"ERRO CRÍTICO ao lançar browser: {str(e)}")
+            return {"status": "error", "message": "Erro de infraestrutura do navegador"}
 
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
