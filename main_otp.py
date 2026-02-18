@@ -6,64 +6,76 @@ import json
 
 app = FastAPI()
 
-# O Railway injeta as variáveis automaticamente. 
-# Se você tiver vinculado o serviço Redis ao seu serviço Python, 
-# a variável REDIS_URL já estará disponível.
+# Configuração robusta do Redis
 REDIS_URL = os.getenv("REDIS_URL")
-
-# Se o Railway fornecer variáveis separadas (comum em versões novas), montamos a URL:
 if not REDIS_URL:
     REDIS_HOST = os.getenv("REDISHOST", "localhost")
     REDIS_PORT = os.getenv("REDISPORT", "6379")
     REDIS_PASS = os.getenv("REDISPASSWORD", "")
     REDIS_URL = f"redis://:{REDIS_PASS}@{REDIS_HOST}:{REDIS_PORT}"
 
-# Inicializa o Redis
+# decode_responses=True evita que você receba 'bytes' e tenha que dar .decode() depois
 r = redis.from_url(REDIS_URL, decode_responses=True)
+
+DOMINIO_PERMITIDO = "@uide.edu.ec"
 
 def extrair_otp(texto):
     if not texto:
         return None
-    # Procura por uma sequência de 6 dígitos no texto
     match = re.search(r'\b\d{6}\b', texto)
     return match.group(0) if match else None
 
 @app.get("/")
 def home():
-    return {"status": "Proxy de OTP Online"}
+    try:
+        r.ping()
+        status_redis = "Conectado"
+    except Exception:
+        status_redis = "Erro de conexão"
+    
+    return {
+        "status": "Proxy de OTP Online",
+        "filtro_dominio": DOMINIO_PERMITIDO,
+        "redis": status_redis
+    }
 
 @app.post("/webhook-sendgrid")
 async def webhook(request: Request):
     try:
+        # Importante: O SendGrid pode enviar uma lista de eventos
         events = await request.json()
         
-        # Log para você ver o JSON bruto no Railway Logs
-        print(f"Evento recebido: {json.dumps(events)}")
-        
+        # Log para debug no Railway
+        print(f"DEBUG: Recebido {len(events)} eventos")
+
         for event in events:
-            email = event.get("email")
+            email = event.get("email", "").lower()
             
-            # Tenta pegar o OTP de 3 lugares possíveis:
-            # 1. De um argumento customizado (mais seguro)
-            # 2. Do corpo do e-mail (se o SendGrid estiver configurado para isso)
-            # 3. De metadados do evento
+            # Filtro de domínio
+            if not email.endswith(DOMINIO_PERMITIDO):
+                print(f"BLOQUEADO: Domínio inválido para {email}")
+                continue
+            
+            # Captura o OTP (tenta args customizados primeiro, depois texto)
             otp = event.get("otp_code") or extrair_otp(event.get("body", ""))
             
             if email and otp:
-                # Salva o código por 2 minutos
-                r.set(f"otp:{email}", otp, ex=120)
+                # Chave com prefixo ajuda na organização do Redis
+                r.set(f"otp:{email}", otp, ex=120) 
                 print(f"SUCESSO: OTP {otp} armazenado para {email}")
             else:
-                print(f"AVISO: Evento recebido para {email}, mas nenhum OTP encontrado.")
-                
+                print(f"AVISO: Dados insuficientes no evento para {email}")
+            
         return {"status": "received"}
     except Exception as e:
-        print(f"ERRO no Webhook: {str(e)}")
-        return {"status": "error", "message": str(e)}
+        print(f"ERRO CRÍTICO NO WEBHOOK: {str(e)}")
+        # Retornamos 200 mesmo no erro para o SendGrid não ficar tentando reenviar infinitamente
+        return {"status": "error", "message": "check logs"}
 
 @app.get("/check-otp")
 async def check_otp(email: str):
+    email = email.lower()
     otp = r.get(f"otp:{email}")
     if otp:
         return {"status": "found", "otp": otp}
-    return {"status": "pending", "message": "Aguardando e-mail do SendGrid..."}
+    return {"status": "pending", "message": "OTP ainda não recebido ou expirado."}
