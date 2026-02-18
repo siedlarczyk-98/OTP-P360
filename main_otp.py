@@ -38,7 +38,6 @@ async def webhook(request: Request):
         email_limpo = email_match.group(0)
         print(f"📩 WEBHOOK: Recebido e-mail para {email_limpo}")
 
-        # Busca o código de 6 dígitos
         match = re.search(r'color:#191847;">(\d{6})</p>', email_html)
         otp = match.group(1) if match else None
 
@@ -77,27 +76,27 @@ async def login_automatizado(email: str):
             )
             page = await context.new_page()
 
-           # --- PASSO 1: SOLICITAR E-MAIL ---
+            # --- PASSO 1: SOLICITAR E-MAIL ---
             print(f"🤖 BOT: Acessando Paciente 360 para {email}")
-            # Tentamos carregar a página e esperar até que não haja mais atividade de rede
             await page.goto("https://auth.paciente360.com.br/login/email", wait_until="domcontentloaded", timeout=60000)
             
-            # Pequena pausa para garantir que os scripts de carregamento rodaram
             await asyncio.sleep(5)
 
-            # Seletor ultra-abrangente: busca qualquer input que pareça um campo de texto ou email
             try:
                 print("🔍 BOT: Procurando campo de entrada...")
                 campo_email = page.locator('input[type="email"], input[name*="email" i], input[placeholder*="email" i], input').first
                 await campo_email.wait_for(state="visible", timeout=15000)
                 await campo_email.fill(email)
-                print("✅ BOT: Campo de e-mail preenchido.")
+                
+                # --- LIMPEZA DE CACHE (DENTRO DO TRY) ---
+                r.delete(f"otp:{email}") 
+                print(f"🧹 BOT: Cache de OTP antigo limpo para {email}")
+                
             except Exception as e:
-                # Se falhar, tira um "print" do HTML para o log (ajuda muito a debugar)
-                print(f"❌ BOT: Não achei o campo. O que estou vendo: {await page.content()[:500]}...")
-                raise Exception("Campo de e-mail não encontrado na página.")
+                print(f"❌ BOT: Erro no preenchimento: {str(e)}")
+                raise Exception("Campo de e-mail não encontrado ou erro no preenchimento.")
             
-            # Clica no botão (geralmente o único botão de destaque na página de login)
+            # Clica no botão de enviar
             btn_enviar = page.locator('button[type="submit"], button:has-text("Receber"), button:has-text("Continuar"), button:has-text("Enviar")').first
             await btn_enviar.click()
             
@@ -105,7 +104,7 @@ async def login_automatizado(email: str):
 
             # --- PASSO 2: AGUARDAR OTP (POLLING) ---
             otp = None
-            for i in range(60): # 60 iterações * 1.5s = 90 segundos de espera
+            for i in range(60): 
                 otp = r.get(f"otp:{email}")
                 if otp:
                     print(f"🔑 BOT: OTP {otp} recuperado do Redis no ciclo {i}!")
@@ -119,10 +118,8 @@ async def login_automatizado(email: str):
 
             # --- PASSO 3: INSERIR OTP E LOGAR ---
             print("🤖 BOT: Localizando campo de OTP na tela...")
-            # Esperamos o campo de OTP aparecer após o clique anterior
             await page.wait_for_selector("input", timeout=15000)
             
-            # O site costuma focar no primeiro input de código que aparece
             otp_field = page.locator('input[placeholder*="código" i], input[name*="otp" i], input').first
             await otp_field.fill(str(otp))
             await page.keyboard.press("Enter")
@@ -130,7 +127,7 @@ async def login_automatizado(email: str):
             # --- PASSO 4: FINALIZAR E COLETAR COOKIES ---
             print("🚀 BOT: Login submetido. Aguardando Dashboard...")
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(5) # Delay de segurança para os cookies
+            await asyncio.sleep(7) # Aumentamos um pouco para garantir a sessão
             
             cookies = await context.cookies()
             await browser.close()
@@ -146,7 +143,6 @@ async def login_automatizado(email: str):
 def gerar_html_redirecionamento(cookies):
     js_cookies = ""
     for c in cookies:
-        # Adicionamos o 'SameSite=None' e 'Secure' para evitar bloqueios de navegadores
         js_cookies += f"document.cookie = '{c['name']}={c['value']}; domain=.paciente360.com.br; path=/; Max-Age=3600; Secure; SameSite=None';\n"
     
     return HTMLResponse(content=f"""
@@ -159,7 +155,6 @@ def gerar_html_redirecionamento(cookies):
                 <div style="margin: 20px 0;"><img src="https://i.gifer.com/ZZ5H.gif" width="50"></div>
             </div>
             <script>
-                // 1. Limpa cookies antigos para evitar conflito
                 const cookiesAntigos = document.cookie.split(";");
                 for (let i = 0; i < cookiesAntigos.length; i++) {{
                     const cookie = cookiesAntigos[i];
@@ -167,14 +162,10 @@ def gerar_html_redirecionamento(cookies):
                     const name = eqPos > -1 ? cookie.substr(0, eqPos) : cookie;
                     document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT; domain=.paciente360.com.br; path=/";
                 }}
-
-                // 2. Injeta os novos cookies
                 {js_cookies}
-
-                // 3. Redireciona
                 setTimeout(() => {{
                     window.location.href = "https://app.paciente360.com.br/dashboard";
-                }}, 1500);
+                }}, 2000);
             </script>
         </body>
     </html>
