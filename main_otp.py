@@ -9,7 +9,6 @@ from playwright.async_api import async_playwright
 app = FastAPI()
 
 # --- CONFIGURAÇÃO REDIS ---
-# No Railway, a variável REDIS_URL é injetada automaticamente
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -28,129 +27,112 @@ def home():
 @app.post("/webhook-sendgrid")
 async def webhook(request: Request):
     try:
-        # Importante: O FastAPI exige python-multipart instalado para rodar o .form()
         form = await request.form()
-        
         email_html = form.get("html", "")
         email_to_raw = form.get("to", "").lower()
         
-        # Extrai apenas o e-mail limpo (remove nomes ou caracteres < >)
         email_match = re.search(r'[\w\.-]+@[\w\.-]+', email_to_raw)
         if not email_match:
-            print(f"⚠️ AVISO: E-mail de destino inválido: {email_to_raw}")
             return {"status": "error", "message": "Destinatário inválido"}
             
         email_limpo = email_match.group(0)
-        print(f"📩 DEBUG: Processando e-mail para {email_limpo}")
+        print(f"📩 WEBHOOK: Recebido e-mail para {email_limpo}")
 
-        # Busca o código de 6 dígitos no HTML
-        # Tentativa 1: Regex específico do template
+        # Busca o código de 6 dígitos
         match = re.search(r'color:#191847;">(\d{6})</p>', email_html)
         otp = match.group(1) if match else None
 
-        # Tentativa 2: Fallback para qualquer sequência de 6 dígitos
         if not otp:
             match_fallback = re.search(r'\b\d{6}\b', email_html)
             otp = match_fallback.group(0) if match_fallback else None
 
         if otp:
-            # Salva no Redis com prefixo para organização
             r.set(f"otp:{email_limpo}", str(otp), ex=300)
-            print(f"✅ SUCESSO: OTP {otp} capturado para {email_limpo}")
+            print(f"✅ WEBHOOK: OTP {otp} salvo para {email_limpo}")
             return {"status": "success"}
         
-        print(f"❌ Erro: OTP não encontrado no HTML para {email_limpo}")
         return {"status": "no_otp_found"}
-
     except Exception as e:
-        print(f"🔥 ERRO CRÍTICO NO WEBHOOK: {e}")
-        return {"status": "error", "message": str(e)}
+        print(f"🔥 ERRO WEBHOOK: {e}")
+        return {"status": "error"}
 
 @app.get("/login-automatizado")
 async def login_automatizado(email: str):
     email = email.lower().strip()
-    
-    # Validação de segurança do domínio
     if not email.endswith(DOMINIO_PERMITIDO):
         raise HTTPException(status_code=403, detail="Domínio não autorizado")
 
     async with async_playwright() as p:
         browser = None
         try:
-            # Lançamento do browser com argumentos anti-bot
             browser = await p.chromium.launch(
                 headless=True, 
-                args=[
-                    '--no-sandbox', 
-                    '--disable-setuid-sandbox', 
-                    '--disable-dev-shm-usage',
-                    '--disable-blink-features=AutomationControlled'
-                ]
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
             )
             
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 viewport={'width': 1280, 'height': 720},
-                locale="es-EC"
+                locale="pt-BR"
             )
             page = await context.new_page()
 
-            print(f"🤖 BOT: Acessando tela de login para {email}")
+            # --- PASSO 1: SOLICITAR E-MAIL ---
+            print(f"🤖 BOT: Acessando Paciente 360 para {email}")
             await page.goto("https://auth.paciente360.com.br/login/email", wait_until="networkidle", timeout=60000)
-
-            await asyncio.sleep(3)
-
-            # --- PASSO 1: PREENCHER EMAIL ---
-            await page.wait_for_selector("input", timeout=15000)
-            campo_email = page.locator('input[type="email"], input[name*="email" i], input').first
-            await campo_email.fill(email)
             
-            btn_enviar = page.locator('button[type="submit"], button:has-text("Receber"), button:has-text("Continuar"), button:has-text("Recibir")').first
+            await page.wait_for_selector('input[type="email"]', timeout=15000)
+            await page.fill('input[type="email"]', email)
+            
+            # Clica no botão de enviar (usando múltiplos seletores possíveis)
+            btn_enviar = page.locator('button[type="submit"], button:has-text("Receber"), button:has-text("Continuar")').first
             await btn_enviar.click()
             
-            print("⏳ BOT: Email enviado. Aguardando OTP no Redis...")
+            print("⏳ BOT: E-mail solicitado. Aguardando OTP no Redis...")
 
-            # --- PASSO 2: POLLING DO REDIS ---
+            # --- PASSO 2: AGUARDAR OTP (POLLING) ---
             otp = None
-            for _ in range(40): # ~60 segundos de espera total
+            for i in range(60): # 60 iterações * 1.5s = 90 segundos de espera
                 otp = r.get(f"otp:{email}")
-                if otp: break
+                if otp:
+                    print(f"🔑 BOT: OTP {otp} recuperado do Redis no ciclo {i}!")
+                    break
                 await asyncio.sleep(1.5)
             
             if not otp:
-                print(f"⏰ TIMEOUT: OTP não chegou para {email}")
+                print(f"⏰ TIMEOUT: OTP não chegou no Redis para {email}")
                 await browser.close()
-                return {"status": "error", "message": "OTP não recebido a tempo."}
+                return {"status": "error", "message": "O código demorou mais de 90s para chegar."}
 
-            # --- PASSO 3: INSERIR OTP ---
-            print(f"🔑 BOT: Inserindo OTP {otp}...")
-            await page.wait_for_selector("input", timeout=10000)
+            # --- PASSO 3: INSERIR OTP E LOGAR ---
+            print("🤖 BOT: Localizando campo de OTP na tela...")
+            # Esperamos o campo de OTP aparecer após o clique anterior
+            await page.wait_for_selector("input", timeout=15000)
             
-            # Localiza o campo de código e preenche
-            otp_field = page.locator('input[placeholder*="código" i], input[placeholder*="code" i], input[name*="otp" i], input').first
-            await otp_field.fill(otp)
+            # O site costuma focar no primeiro input de código que aparece
+            otp_field = page.locator('input[placeholder*="código" i], input[name*="otp" i], input').first
+            await otp_field.fill(str(otp))
             await page.keyboard.press("Enter")
             
-            # --- PASSO 4: CAPTURAR SESSÃO ---
+            # --- PASSO 4: FINALIZAR E COLETAR COOKIES ---
+            print("🚀 BOT: Login submetido. Aguardando Dashboard...")
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(5) # Tempo para os cookies de sessão estabilizarem
+            await asyncio.sleep(5) # Delay de segurança para os cookies
             
             cookies = await context.cookies()
             await browser.close()
-            print(f"🎉 SUCESSO: Sessão capturada para {email}")
+            print(f"🎉 SUCESSO: Login concluído para {email}")
 
             return gerar_html_redirecionamento(cookies)
 
         except Exception as e:
-            print(f"❌ ERRO NO ROBÔ: {str(e)}")
+            print(f"❌ ERRO NO BOT: {str(e)}")
             if browser: await browser.close()
-            return {"status": "error", "message": f"Falha na automação: {str(e)}"}
+            return {"status": "error", "message": str(e)}
 
 def gerar_html_redirecionamento(cookies):
-    # Converte os cookies para o formato document.cookie do navegador
     js_cookies = ""
     for c in cookies:
-        # Importante: domain=.paciente360.com.br permite que o cookie funcione no app. e auth.
         js_cookies += f"document.cookie = '{c['name']}={c['value']}; domain=.paciente360.com.br; path=/; Secure; SameSite=None';\n"
     
     return HTMLResponse(content=f"""
