@@ -6,7 +6,7 @@ import re
 import json
 import asyncio
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import stealth_async_inject
 
 app = FastAPI()
 
@@ -76,7 +76,7 @@ async def login_automatizado(email: str):
             locale="es-EC" # Forçamos espanhol para os alunos da UIDE
         )
         page = await context.new_page()
-        await stealth_async(page)
+        await stealth_async_inject(page)
 
         try:
             # 1. Acessa a plataforma
