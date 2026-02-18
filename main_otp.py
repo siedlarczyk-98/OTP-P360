@@ -62,9 +62,23 @@ async def login_automatizado(email: str):
     if not email.endswith(DOMINIO_PERMITIDO):
         raise HTTPException(status_code=403, detail="Domínio não autorizado")
 
+    # MUDANÇA AQUI: Detecta o caminho do Chromium no Railway
+    # O Railway geralmente instala em /usr/bin/chromium ou /usr/bin/google-chrome
+    chrome_executable = os.getenv("CHROME_PATH", "/usr/bin/chromium")
+
     async with async_playwright() as p:
-        # Lançamento otimizado para Railway
-        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+        try:
+            # Lançamento com caminho explícito para evitar erro "Executable doesn't exist"
+            browser = await p.chromium.launch(
+                headless=True, 
+                executable_path=chrome_executable,
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            )
+        except Exception as launch_error:
+            # Fallback caso o caminho acima falhe (tenta o padrão do sistema)
+            print(f"Aviso: Falha ao carregar chromium em {chrome_executable}. Tentando automático...")
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
+
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
             locale="es-EC"
@@ -114,12 +128,11 @@ async def login_automatizado(email: str):
         except Exception as e:
             print(f"ERRO NO ROBÔ: {str(e)}")
             await browser.close()
-            return {"status": "error", "message": "Falha na automação."}
+            return {"status": "error", "message": f"Falha na automação: {str(e)}"}
 
 def gerar_html_redirecionamento(cookies):
     js_cookies = ""
     for c in cookies:
-        # Mesma lógica robusta para os cookies
         js_cookies += f"document.cookie = '{c['name']}={c['value']}; domain=.paciente360.com.br; path=/; Secure; SameSite=None';\n"
     
     return HTMLResponse(content=f"""
