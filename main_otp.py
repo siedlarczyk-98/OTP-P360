@@ -4,6 +4,7 @@ import redis
 import os
 import re
 import asyncio
+import json
 from playwright.async_api import async_playwright
 
 app = FastAPI()
@@ -14,6 +15,7 @@ r = redis.from_url(REDIS_URL, decode_responses=True)
 
 # --- CONFIGURAÇÕES DE NEGÓCIO ---
 DOMINIO_PERMITIDO = "@otp-p360.com.br"
+MY_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 
 @app.get("/")
 def home():
@@ -66,41 +68,47 @@ async def login_automatizado(email: str):
         try:
             browser = await p.chromium.launch(
                 headless=True, 
-                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
+                args=[
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox', 
+                    '--disable-dev-shm-usage', 
+                    '--disable-blink-features=AutomationControlled'
+                ]
             )
             
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                viewport={'width': 1280, 'height': 720},
-                locale="pt-BR"
+                user_agent=MY_USER_AGENT,
+                viewport={'width': 1366, 'height': 768},
+                locale="pt-BR",
+                timezone_id="America/Sao_Paulo"
             )
+            
             page = await context.new_page()
+            # Camuflagem extra contra detecção de bot
+            await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
             # --- PASSO 1: SOLICITAR E-MAIL ---
             print(f"🤖 BOT: Acessando Paciente 360 para {email}")
-            await page.goto("https://auth.paciente360.com.br/login/email", wait_until="domcontentloaded", timeout=60000)
+            await page.goto("https://auth.paciente360.com.br/login/email", wait_until="networkidle", timeout=60000)
             
-            await asyncio.sleep(5)
+            await asyncio.sleep(4)
 
             try:
-                print("🔍 BOT: Procurando campo de entrada...")
-                campo_email = page.locator('input[type="email"], input[name*="email" i], input[placeholder*="email" i], input').first
-                await campo_email.wait_for(state="visible", timeout=15000)
+                print("🔍 BOT: Localizando campo de e-mail...")
+                campo_email = page.locator('input[type="email"], input[name*="email" i], input').first
                 await campo_email.fill(email)
                 
-                # --- LIMPEZA DE CACHE (DENTRO DO TRY) ---
                 r.delete(f"otp:{email}") 
-                print(f"🧹 BOT: Cache de OTP antigo limpo para {email}")
+                print(f"🧹 BOT: Cache de OTP limpo para {email}")
                 
             except Exception as e:
                 print(f"❌ BOT: Erro no preenchimento: {str(e)}")
-                raise Exception("Campo de e-mail não encontrado ou erro no preenchimento.")
+                raise Exception("Campo de e-mail não encontrado.")
             
-            # Clica no botão de enviar
-            btn_enviar = page.locator('button[type="submit"], button:has-text("Receber"), button:has-text("Continuar"), button:has-text("Enviar")').first
+            btn_enviar = page.locator('button[type="submit"], button:has-text("Receber"), button:has-text("Continuar")').first
             await btn_enviar.click()
             
-            print("⏳ BOT: E-mail solicitado. Aguardando OTP no Redis...")
+            print("⏳ BOT: E-mail solicitado. Aguardando OTP fresco no Redis...")
 
             # --- PASSO 2: AGUARDAR OTP (POLLING) ---
             otp = None
@@ -114,58 +122,89 @@ async def login_automatizado(email: str):
             if not otp:
                 print(f"⏰ TIMEOUT: OTP não chegou no Redis para {email}")
                 await browser.close()
-                return {"status": "error", "message": "O código demorou mais de 90s para chegar."}
+                return {"status": "error", "message": "O código demorou mais de 90s."}
 
             # --- PASSO 3: INSERIR OTP E LOGAR ---
-            print("🤖 BOT: Localizando campo de OTP na tela...")
+            print("🤖 BOT: Inserindo OTP no formulário...")
             await page.wait_for_selector("input", timeout=15000)
-            
-            otp_field = page.locator('input[placeholder*="código" i], input[name*="otp" i], input').first
+            otp_field = page.locator('input').first
             await otp_field.fill(str(otp))
             await page.keyboard.press("Enter")
             
-            # --- PASSO 4: FINALIZAR E COLETAR COOKIES ---
-            print("🚀 BOT: Login submetido. Aguardando Dashboard...")
+            # --- PASSO 4: CAPTURAR PERSISTÊNCIA COMPLETA ---
+            print("🚀 BOT: Aguardando estabilização do Dashboard...")
+            # Espera carregar a URL de destino ou estabilizar a rede
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(7) # Aumentamos um pouco para garantir a sessão
+            await asyncio.sleep(8) 
+            
+            # Captura cookies e o estado dos storages (localStorage e sessionStorage)
+            storage_data = await page.evaluate("""() => {
+                return {
+                    local: JSON.stringify(localStorage),
+                    session: JSON.stringify(sessionStorage)
+                };
+            }""")
             
             cookies = await context.cookies()
             await browser.close()
-            print(f"🎉 SUCESSO: Login concluído para {email}")
+            print(f"🎉 SUCESSO: Sessão completa capturada para {email}")
 
-            return gerar_html_redirecionamento(cookies)
+            return gerar_html_redirecionamento(cookies, storage_data)
 
         except Exception as e:
             print(f"❌ ERRO NO BOT: {str(e)}")
             if browser: await browser.close()
             return {"status": "error", "message": str(e)}
 
-def gerar_html_redirecionamento(cookies):
+def gerar_html_redirecionamento(cookies, storage):
     js_cookies = ""
     for c in cookies:
         js_cookies += f"document.cookie = '{c['name']}={c['value']}; domain=.paciente360.com.br; path=/; Max-Age=3600; Secure; SameSite=None';\n"
     
+    # Escapa as strings do storage para o JS
+    local_json = storage['local']
+    session_json = storage['session']
+
     return HTMLResponse(content=f"""
     <html>
-        <head><meta charset="UTF-8"><title>Sincronizando...</title></head>
+        <head><meta charset="UTF-8"><title>Sincronizando Sessão...</title></head>
         <body style="font-family: sans-serif; text-align: center; padding-top: 100px; background: #f4f4f9;">
-            <div style="max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                <h2 style="color: #2d3748;">¡Autenticação Concluída!</h2>
-                <p style="color: #4a5568;">Sincronizando cookies de sessão...</p>
-                <div style="margin: 20px 0;"><img src="https://i.gifer.com/ZZ5H.gif" width="50"></div>
+            <div style="max-width: 400px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);">
+                <h2 style="color: #2d3748;">Autenticação Concluída</h2>
+                <p style="color: #4a5568;">Sincronizando chaves de segurança e redirecionando...</p>
+                <div style="margin: 20px 0;"><img src="https://i.gifer.com/ZZ5H.gif" width="40"></div>
             </div>
             <script>
-                const cookiesAntigos = document.cookie.split(";");
-                for (let i = 0; i < cookiesAntigos.length; i++) {{
-                    const cookie = cookiesAntigos[i];
-                    const eqPos = cookie.indexOf("=");
-                    const name = eqPos > -1 ? cookie.substr(0, eqPos) : cookie;
-                    document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT; domain=.paciente360.com.br; path=/";
-                }}
-                {js_cookies}
-                setTimeout(() => {{
+                try {{
+                    // 1. Limpeza profunda de cookies antigos
+                    const cookiesAntigos = document.cookie.split(";");
+                    for (let i = 0; i < cookiesAntigos.length; i++) {{
+                        const name = cookiesAntigos[i].split("=")[0].trim();
+                        document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT; domain=.paciente360.com.br; path=/";
+                    }}
+
+                    // 2. Injeção de Storages (Crucial para SPAs modernos)
+                    const localData = JSON.parse({json.dumps(local_json)});
+                    const sessionData = JSON.parse({json.dumps(session_json)});
+                    
+                    const localObj = JSON.parse(localData);
+                    const sessionObj = JSON.parse(sessionData);
+
+                    for (let k in localObj) localStorage.setItem(k, localObj[k]);
+                    for (let k in sessionObj) sessionStorage.setItem(k, sessionObj[k]);
+
+                    // 3. Injeção de Cookies
+                    {js_cookies}
+
+                    console.log("Sessão sincronizada.");
+
+                    setTimeout(() => {{
+                        window.location.href = "https://app.paciente360.com.br/dashboard";
+                    }}, 2000);
+                }} catch (e) {{
+                    console.error("Erro na sincronização:", e);
                     window.location.href = "https://app.paciente360.com.br/dashboard";
-                }}, 2000);
+                }}
             </script>
         </body>
     </html>
