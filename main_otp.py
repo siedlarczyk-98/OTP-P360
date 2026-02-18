@@ -6,7 +6,6 @@ import re
 import json
 import asyncio
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async_inject
 
 app = FastAPI()
 
@@ -64,14 +63,13 @@ async def login_automatizado(email: str):
         raise HTTPException(status_code=403, detail="Domínio não autorizado")
 
     async with async_playwright() as p:
+        # Lançamento otimizado para Railway
         browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
             locale="es-EC"
         )
         page = await context.new_page()
-        # Correção do Stealth
-        await stealth_async_inject(page, None)
 
         try:
             print(f"DEBUG: Iniciando login para {email}")
@@ -82,9 +80,9 @@ async def login_automatizado(email: str):
             await page.get_by_role("button", name=REGEX_BOTAO_LOGIN).click()
             print("DEBUG: E-mail enviado, aguardando OTP no Redis...")
 
-            # Passo 2: Espera OTP
+            # Passo 2: Espera OTP (Polling)
             otp = None
-            for i in range(25): # Aumentado para 25 tentativas (~37 segundos)
+            for _ in range(25): 
                 otp = r.get(f"otp:{email}")
                 if otp: break
                 await asyncio.sleep(1.5)
@@ -92,22 +90,20 @@ async def login_automatizado(email: str):
             if not otp:
                 print(f"TIMEOUT: OTP não encontrado para {email}")
                 await browser.close()
-                return {"status": "error", "message": "OTP não recebido a tempo. Tente novamente."}
+                return {"status": "error", "message": "OTP não recebido. Tente novamente."}
 
             # Passo 3: Preencher OTP
             print(f"DEBUG: OTP {otp} encontrado. Inserindo...")
             try:
-                # Tenta localizar o campo, se falhar, clica e digita
                 await page.get_by_placeholder(REGEX_CAMPO_OTP).fill(otp)
             except:
-                await page.mouse.click(640, 360) # Clica no centro da tela para focar
                 await page.keyboard.type(otp, delay=100)
             
             await page.keyboard.press("Enter")
             
-            # Passo 4: Estabilização e Cookies
+            # Passo 4: Captura de Sessão
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(2) # Pausa técnica para garantir a sessão
+            await asyncio.sleep(2)
             
             cookies = await context.cookies()
             await browser.close()
@@ -118,12 +114,12 @@ async def login_automatizado(email: str):
         except Exception as e:
             print(f"ERRO NO ROBÔ: {str(e)}")
             await browser.close()
-            return {"status": "error", "message": "Falha na automação. Verifique os logs."}
+            return {"status": "error", "message": "Falha na automação."}
 
 def gerar_html_redirecionamento(cookies):
     js_cookies = ""
     for c in cookies:
-        # Ajuste de SameSite=None e Secure é vital para injeção entre domínios diferentes
+        # Mesma lógica robusta para os cookies
         js_cookies += f"document.cookie = '{c['name']}={c['value']}; domain=.paciente360.com.br; path=/; Secure; SameSite=None';\n"
     
     return HTMLResponse(content=f"""
@@ -136,14 +132,10 @@ def gerar_html_redirecionamento(cookies):
                 <div style="margin: 20px 0;"><img src="https://i.gifer.com/ZZ5H.gif" width="50"></div>
             </div>
             <script>
-                try {{
-                    {js_cookies}
-                    setTimeout(() => {{
-                        window.location.href = "https://app.paciente360.com.br/dashboard";
-                    }}, 1500);
-                }} catch(e) {{
-                    console.error("Erro ao injetar cookies:", e);
-                }}
+                {js_cookies}
+                setTimeout(() => {{
+                    window.location.href = "https://app.paciente360.com.br/dashboard";
+                }}, 1500);
             </script>
         </body>
     </html>
