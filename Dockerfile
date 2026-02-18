@@ -1,19 +1,38 @@
-# Usar a imagem oficial do Playwright que já tem todas as libs e navegadores
-FROM mcr.microsoft.com/playwright/python:v1.58.0-jammy
+# Usamos uma imagem Python leve em vez da imagem pesada do Playwright
+FROM python:3.11-slim
 
-# Definir diretório de trabalho
+# Instalar dependências de sistema necessárias para o Playwright
+RUN apt-get update && apt-get install -y \
+    libevent-2.1-7 \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copiar os arquivos do projeto
+# Primeiro copiamos apenas o requirements para aproveitar o CACHE do Docker
 COPY requirements.txt .
-COPY . .
-
-# Instalar dependências do Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Variáveis de ambiente para o Playwright rodar no Docker
-ENV PYTHONUNBUFFERED=1
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# Instalamos APENAS o navegador Chromium (economiza +1GB de download)
+RUN playwright install chromium --with-deps
 
-# Comando para rodar a aplicação
-CMD ["uvicorn", "main_otp:app", "--host", "0.0.0.0", "--port", "8080"]
+# Agora copiamos o restante do código
+COPY . .
+
+# Comando para rodar a API (ajuste o nome do arquivo se não for main.py)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
