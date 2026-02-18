@@ -32,7 +32,6 @@ async def webhook(request: Request):
             email = event.get("email", "").lower()
             if not email.endswith(DOMINIO_PERMITIDO): continue
             
-            # Busca OTP no corpo do email ou campo específico
             body = event.get("body", "")
             match = re.search(r'\b\d{6}\b', body)
             otp = event.get("otp_code") or (match.group(0) if match else None)
@@ -53,61 +52,73 @@ async def login_automatizado(email: str):
 
     async with async_playwright() as p:
         try:
-            # Lançamento padrão para Docker Playwright
+            # AJUSTE 1: Argumentos de camuflagem nativa para evitar detecção de bot
             browser = await p.chromium.launch(
                 headless=True, 
-                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+                args=[
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox', 
+                    '--disable-dev-shm-usage',
+                    '--disable-blink-features=AutomationControlled' # Oculta o uso de automação
+                ]
             )
+            
+            # AJUSTE 2: Contexto com User Agent moderno e Viewport padrão
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                viewport={'width': 1280, 'height': 720},
                 locale="es-EC"
             )
             page = await context.new_page()
 
-            print(f"DEBUG: Acessando site para {email}")
-            await page.goto("https://auth.paciente360.com.br/login", wait_until="networkidle", timeout=60000)
+            # AJUSTE 3: Uso da URL direta para o campo de e-mail
+            print(f"DEBUG: Acessando URL direta de email para {email}")
+            await page.goto("https://auth.paciente360.com.br/login/email", wait_until="networkidle", timeout=60000)
+
+            # Pequena pausa para garantir renderização de scripts internos
+            await asyncio.sleep(3)
 
             # --- PASSO 1: ENCONTRAR E PREENCHER EMAIL ---
             print("DEBUG: Localizando campo de email...")
-            # Espera por qualquer input para garantir que o formulário carregou
+            # Como estamos na URL direta, buscamos o primeiro input disponível
             await page.wait_for_selector("input", timeout=15000)
             
-            # Tenta preencher por múltiplos seletores (mais robusto)
-            await page.locator('input[type="email"], input[name*="email" i], input[placeholder*="email" i]').first.fill(email)
+            # Seletor ultra-robusto: foca no tipo email ou no primeiro input de texto
+            campo_email = page.locator('input[type="email"], input[name*="email" i], input').first
+            await campo_email.fill(email)
             
-            # Clica no botão de enviar (Busca por texto flexível)
-            await page.locator('button:has-text("Receber"), button:has-text("Recibir"), button:has-text("Get"), button:has-text("Acessar")').first.click()
-            print("DEBUG: Email enviado. Aguardando OTP no Redis...")
+            # Clica no botão (geralmente do tipo submit ou com textos específicos)
+            btn_enviar = page.locator('button[type="submit"], button:has-text("Receber"), button:has-text("Continuar"), button:has-text("Recibir")').first
+            await btn_enviar.click()
+            
+            print("DEBUG: Email submetido. Aguardando OTP no Redis...")
 
             # --- PASSO 2: ESPERA OTP (POLLING) ---
             otp = None
-            for _ in range(30): # 45 segundos de espera total
+            for _ in range(35): # Aumentado para 52 segundos de tolerância
                 otp = r.get(f"otp:{email}")
                 if otp: break
                 await asyncio.sleep(1.5)
             
             if not otp:
                 print(f"TIMEOUT: OTP não encontrado para {email}")
+                # Captura log do que o robô está vendo antes de fechar (ajuda no debug)
+                # print(f"DEBUG HTML: {await page.content()[:500]}")
                 await browser.close()
                 return {"status": "error", "message": "OTP não recebido a tempo."}
 
             # --- PASSO 3: PREENCHER OTP ---
             print(f"DEBUG: Inserindo OTP {otp}...")
-            # Espera o campo de código aparecer
             await page.wait_for_selector("input", timeout=10000)
             
-            # Tenta preencher o código
-            otp_field = page.locator('input[placeholder*="código" i], input[placeholder*="code" i], input[name*="otp" i]').first
-            if await otp_field.is_visible():
-                await otp_field.fill(otp)
-            else:
-                await page.keyboard.type(otp, delay=100)
-            
+            # Busca campo de OTP
+            otp_field = page.locator('input[placeholder*="código" i], input[placeholder*="code" i], input[name*="otp" i], input').first
+            await otp_field.fill(otp)
             await page.keyboard.press("Enter")
             
             # --- PASSO 4: FINALIZAÇÃO ---
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(3) # Tempo para os cookies assentarem
+            await asyncio.sleep(4) # Tempo extra para segurança dos cookies
             
             cookies = await context.cookies()
             await browser.close()
@@ -117,7 +128,6 @@ async def login_automatizado(email: str):
 
         except Exception as e:
             print(f"ERRO NO ROBÔ: {str(e)}")
-            # Se quiser debugar, o log do Railway vai mostrar o erro exato aqui
             if 'browser' in locals(): await browser.close()
             return {"status": "error", "message": f"Falha na automação: {str(e)}"}
 
