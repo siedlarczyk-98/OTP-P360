@@ -1,5 +1,5 @@
 # Usamos uma imagem Python leve em vez da imagem pesada do Playwright
-FROM python:3.11-slim
+FROM python:3.11
 
 # Instalar dependências de sistema necessárias para o Playwright
 RUN apt-get update && apt-get install -y \
