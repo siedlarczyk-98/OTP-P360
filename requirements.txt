@@ -4,3 +4,4 @@ redis
 playwright
 python-multipart
 supabase
+pydantic
