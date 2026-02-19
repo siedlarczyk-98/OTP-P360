@@ -28,7 +28,7 @@ FAVICON_URL = "https://biabapecceelzvwwunvm.supabase.co/storage/v1/object/public
 TRADUCOES = {
     "pt": {
         "titulo": "Central de Rastreamento OTP",
-        "login_titulo": "Acesso Restrito",
+        "login_titulo": "Acesso Laboratório",
         "login_erro": "Acesso negado. Verifique os dados.",
         "passo_a_passo": "📖 Passo a Passo:",
         "instrucoes": [
@@ -39,7 +39,7 @@ TRADUCOES = {
         "btn_rastrear": "Rastrear OTP",
         "status_inicial": "Aguardando rastreamento...",
         "status_lendo": "🔎 Rastreando e-mail para: ",
-        "status_sucesso": "✅ CÓDIGO LOCALIZADO! COPIE ABAIXO:",
+        "status_sucesso": "CÓDIGO LOCALIZADO! COPIE ABAIXO:",
         "msg_vazio": "Nenhuma conta cadastrada para esta faculdade.",
         "logout": "Sair",
         "btn_ok": "Entrar",
@@ -48,7 +48,7 @@ TRADUCOES = {
     },
     "en": {
         "titulo": "OTP Tracking Hub",
-        "login_titulo": "Restricted Access",
+        "login_titulo": "Lab Access",
         "login_erro": "Access denied. Please check your credentials.",
         "passo_a_passo": "📖 Step by Step:",
         "instrucoes": [
@@ -59,7 +59,7 @@ TRADUCOES = {
         "btn_rastrear": "Track OTP",
         "status_inicial": "Waiting for tracking...",
         "status_lendo": "🔎 Tracking email for: ",
-        "status_sucesso": "✅ CODE LOCATED! COPY BELOW:",
+        "status_sucesso": "CODE LOCATED! COPY BELOW:",
         "msg_vazio": "No accounts registered for this college.",
         "logout": "Logout",
         "btn_ok": "Login",
@@ -68,7 +68,7 @@ TRADUCOES = {
     },
     "es": {
         "titulo": "Centro de Rastreo OTP",
-        "login_titulo": "Acceso Restringido",
+        "login_titulo": "Acceso Laboratorio",
         "login_erro": "Acceso denegado. Verifique los datos.",
         "passo_a_passo": "📖 Paso a Paso:",
         "instrucoes": [
@@ -79,7 +79,7 @@ TRADUCOES = {
         "btn_rastrear": "Rastrear OTP",
         "status_inicial": "Esperando rastreo...",
         "status_lendo": "🔎 Rastreando correo para: ",
-        "status_sucesso": "✅ ¡CÓDIGO LOCALIZADO! COPIE ABAJO:",
+        "status_sucesso": "¡CÓDIGO LOCALIZADO! COPIE ABAJO:",
         "msg_vazio": "No hay cuentas registradas para esta facultad.",
         "logout": "Salir",
         "btn_ok": "Ingresar",
