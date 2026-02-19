@@ -61,58 +61,50 @@ def get_idioma(request: Request):
 
 # --- ROTA RAIZ (LOGIN) ---
 
-@app.get("/", response_class=HTMLResponse)
-async def login_page(request: Request, user_id: str = Cookie(None)):
-    if user_id: 
-        return RedirectResponse(url="/dashboard")
+@app.get("/get-raw-otp")
+async def get_otp(email: str, user_id: str = Cookie(None)):
+    if not user_id: 
+        return {"otp": None}
     
-    idioma = get_idioma(request)
-    t = TRADUCOES[idioma]
+    # 1. Limpeza total do e-mail para evitar erros de maiúsculas/espaços
+    email_limpo = email.strip().lower()
     
-    return f"""
-    <html>
-        <head><title>Login | {t['titulo']}</title>
-        <style>
-            body {{ font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #f0f2f5; margin: 0; }}
-            .card {{ background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 320px; text-align: center; }}
-            input {{ width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }}
-            button {{ width: 100%; padding: 12px; background: #1877f2; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 16px; }}
-            #msg {{ color:red; display:none; font-size: 14px; margin-top: 10px; }}
-        </style></head>
-        <body>
-            <div class="card">
-                <h2>{t['login_titulo']}</h2>
-                <input type="email" id="user" placeholder="E-mail">
-                <input type="password" id="pass" placeholder="Senha">
-                <button onclick="entrar()">OK</button>
-                <p id="msg">{t['login_erro']}</p>
-            </div>
-            <script>
-                async function entrar() {{
-                    const email = document.getElementById('user').value;
-                    const password = document.getElementById('pass').value;
-                    const res = await fetch('/auth/login', {{
-                        method: 'POST',
-                        headers: {{'Content-Type': 'application/json'}},
-                        body: JSON.stringify({{email, password}})
-                    }});
-                    if(res.ok) window.location.href = '/dashboard';
-                    else document.getElementById('msg').style.display = 'block';
-                }}
-            </script>
-        </body></html>
-    """
+    # 2. Debug forçado para o log do Railway
+    print(f"🔎 [DASHBOARD] Buscando no Redis a chave: otp:{email_limpo}", flush=True)
 
-@app.post("/auth/login")
-async def auth_login(data: LoginData, response: Response):
-    try:
-        res = supabase.auth.sign_in_with_password({"email": data.email, "password": data.password})
-        if res.user:
-            response.set_cookie(key="user_id", value=res.user.id, httponly=True, max_age=3600 * 12)
-            return {"status": "ok"}
-    except:
-        pass
-    raise HTTPException(status_code=401)
+    # 3. Verifica no banco se este e-mail pertence ao usuário logado
+    check = supabase.table("contas_paciente").select("id").eq("email", email_limpo).eq("owner_id", user_id).execute()
+    
+    if check.data:
+        # 4. BUSCA CORRETA: Uma única chave para injetar a variável
+        codigo = r.get(f"otp:{email_limpo}")
+        print(f"💰 [RESULTADO] Código encontrado no Redis: {codigo}", flush=True)
+        return {"otp": codigo}
+    
+    print(f"🚫 [ERRO] A conta {email_limpo} não pertence ao usuário {user_id}", flush=True)
+    return {"otp": None}
+
+@app.post("/webhook-sendgrid")
+async def webhook(request: Request):
+    form = await request.form()
+    email_html = form.get("html", "")
+    email_to = form.get("to", "").lower()
+    
+    match_to = re.search(r'[\w\.-]+@[\w\.-]+', email_to)
+    if match_to:
+        # 1. Limpeza total no salvamento também
+        alvo = match_to.group(0).strip().lower()
+        
+        # Regex do OTP (Paciente 360)
+        otp_match = re.search(r'color:#191847;">(\d{6})</p>', email_html)
+        otp = otp_match.group(1) if otp_match else None
+        
+        if otp:
+            # Salvamos com a mesma estrutura de limpeza
+            r.set(f"otp:{alvo}", otp, ex=300) # 5 minutos de validade
+            print(f"✅ [WEBHOOK] OTP {otp} salvo para a chave: otp:{alvo}", flush=True)
+            
+    return {"status": "ok"}
 
 # --- DASHBOARD ---
 
