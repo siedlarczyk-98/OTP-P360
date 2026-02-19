@@ -25,21 +25,23 @@ class LoginData(BaseModel):
     password: str
 
 # --- ROBÔ EM BACKGROUND ---
-async def rodar_solicitacao_otp(email: str):
+async def rodar_solicitacao_otp(email_alvo: str):
     async with async_playwright() as p:
         browser = None
         try:
-            print(f"🤖 [ROBÔ] Iniciando para: {email}")
+            print(f"🤖 [ROBÔ] Solicitando para: {email_alvo}")
             browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
             context = await browser.new_context(user_agent=UA)
             page = await context.new_page()
-            r.delete(f"otp:{email}")
+            
+            # Limpa cache do Redis antes de pedir novo código
+            r.delete(f"otp:{email_alvo}")
             
             await page.goto("https://auth.paciente360.com.br/login/email", wait_until="networkidle", timeout=60000)
-            await page.fill('input[type="email"]', email)
+            await page.fill('input[type="email"]', email_alvo)
             await page.click('button[type="submit"]')
             
-            print(f"✅ [ROBÔ] Sucesso para {email}")
+            print(f"✅ [ROBÔ] Solicitação enviada para {email_alvo}")
             await asyncio.sleep(5)
         except Exception as e:
             print(f"❌ [ROBÔ ERRO] {e}")
@@ -50,9 +52,7 @@ async def rodar_solicitacao_otp(email: str):
 
 @app.get("/", response_class=HTMLResponse)
 async def login_page(user_id: str = Cookie(None)):
-    if user_id: # Se já estiver logado, vai direto pro dashboard
-        return RedirectResponse(url="/dashboard")
-    
+    if user_id: return RedirectResponse(url="/dashboard")
     return """
     <html>
         <head><title>Login | Hub OTP</title>
@@ -60,16 +60,16 @@ async def login_page(user_id: str = Cookie(None)):
             body { font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #f0f2f5; margin: 0; }
             .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 320px; text-align: center; }
             input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
-            button { width: 100%; padding: 12px; background: #1877f2; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 16px; }
+            button { width: 100%; padding: 12px; background: #1877f2; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
             #msg { color:red; display:none; font-size: 14px; margin-top: 10px; }
         </style></head>
         <body>
             <div class="card">
                 <h2>Portal Faculdades</h2>
-                <input type="email" id="user" placeholder="E-mail">
+                <input type="email" id="user" placeholder="E-mail de acesso">
                 <input type="password" id="pass" placeholder="Senha">
                 <button onclick="entrar()">Entrar</button>
-                <p id="msg">Credenciais inválidas.</p>
+                <p id="msg">Acesso negado. Verifique os dados.</p>
             </div>
             <script>
                 async function entrar() {
@@ -92,7 +92,6 @@ async def auth_login(data: LoginData, response: Response):
     try:
         res = supabase.auth.sign_in_with_password({"email": data.email, "password": data.password})
         if res.user:
-            # Salvamos o ID do usuário no Cookie para saber quem está logado
             response.set_cookie(key="user_id", value=res.user.id, httponly=True, max_age=3600 * 12)
             return {"status": "ok"}
     except: pass
@@ -103,76 +102,75 @@ async def logout(response: Response):
     response.delete_cookie("user_id")
     return RedirectResponse(url="/")
 
-# --- DASHBOARD MULTITENANT ---
+# --- DASHBOARD ---
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(user_id: str = Cookie(None)):
-    if not user_id:
-        return RedirectResponse(url="/")
+    if not user_id: return RedirectResponse(url="/")
 
-    # FILTRO MULTITENANT: Busca apenas contas onde o owner_id é o ID do usuário logado
+    # Filtra contas pertencentes ao usuário logado
     contas = supabase.table("contas_paciente").select("*").eq("owner_id", user_id).execute()
     
-    cards = ""
+    cards_html = ""
     for c in contas.data:
-        cards += f"""
+        nome = c.get('nome_amigavel') or 'Unidade Sem Nome'
+        email_conta = c.get('email') or 'E-mail não cadastrado'
+        
+        cards_html += f'''
         <div class="card-conta">
             <div>
-                <strong>{c['nome_amigavel']}</strong><br>
-                <span>{c['email_alvo']}</span>
+                <strong>{nome}</strong><br>
+                <span style="color: #65676b; font-size: 13px;">{email_conta}</span>
             </div>
-            <button onclick="pedir('{c['email_alvo']}')">Solicitar OTP</button>
+            <button onclick="pedir('{email_conta}')">Solicitar OTP</button>
         </div>
-        """
+        '''
 
     if not contas.data:
-        cards = "<p style='text-align:center; color:#666;'>Nenhuma conta vinculada a esta faculdade.</p>"
+        cards_html = "<p style='text-align:center; color:#666;'>Nenhuma conta cadastrada para esta faculdade.</p>"
 
     return f"""
     <html>
-        <head><title>Meus Acessos | OTP</title>
+        <head><title>Dashboard | Central OTP</title>
         <style>
             body {{ font-family: 'Segoe UI', sans-serif; background: #f0f2f5; margin: 0; padding: 20px; }}
             .container {{ max-width: 600px; margin: auto; }}
             .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }}
-            .card-conta {{ background: white; padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }}
-            button {{ background: #42b72a; color: white; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; }}
-            .terminal {{ background: #1c1e21; color: #42b72a; padding: 20px; border-radius: 10px; margin-top: 20px; text-align: center; min-height: 100px; }}
-            #otp {{ font-size: 48px; color: white; display: block; margin-top: 10px; letter-spacing: 5px; }}
-            .logout {{ color: #d93025; text-decoration: none; font-size: 14px; }}
+            .card-conta {{ background: white; padding: 20px; border-radius: 12px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }}
+            button {{ background: #42b72a; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; }}
+            .terminal {{ background: #1c1e21; color: #42b72a; padding: 25px; border-radius: 12px; margin-top: 25px; text-align: center; }}
+            #otp {{ font-size: 52px; color: white; display: block; margin-top: 10px; letter-spacing: 8px; font-weight: bold; }}
+            .logout {{ color: #d93025; text-decoration: none; font-size: 14px; font-weight: bold; }}
         </style></head>
         <body>
             <div class="container">
                 <div class="header">
-                    <h2>🔐 Suas Contas</h2>
+                    <h2>🔑 Gerenciador de Acessos</h2>
                     <a href="/logout" class="logout">Sair</a>
                 </div>
-                {cards}
+                {cards_html}
                 <div class="terminal">
                     <div id="status">Selecione uma conta acima</div>
                     <div id="otp">------</div>
                 </div>
             </div>
             <script>
-                let timer;
+                let poll;
                 async function pedir(email) {{
-                    document.getElementById('status').innerText = "🤖 Acionando robô para " + email;
+                    document.getElementById('status').innerText = "🤖 Robô em ação para " + email;
                     document.getElementById('otp').innerText = "......";
                     
                     const res = await fetch('/disparar-robo?email=' + email);
-                    if (!res.ok) {{
-                        alert("Erro ao disparar robô ou sem permissão.");
-                        return;
-                    }}
+                    if (!res.ok) {{ alert("Erro na solicitação. Verifique se você é o dono desta conta."); return; }}
                     
-                    if(timer) clearInterval(timer);
-                    timer = setInterval(async () => {{
+                    if(poll) clearInterval(poll);
+                    poll = setInterval(async () => {{
                         const r = await fetch('/get-raw-otp?email=' + email);
                         const d = await r.json();
                         if(d.otp) {{
                             document.getElementById('otp').innerText = d.otp;
                             document.getElementById('status').innerText = "✅ CÓDIGO CAPTURADO!";
-                            clearInterval(timer);
+                            clearInterval(poll);
                         }}
                     }}, 2000);
                 }}
@@ -180,14 +178,15 @@ async def dashboard(user_id: str = Cookie(None)):
         </body></html>
     """
 
+# --- OPERAÇÕES ---
+
 @app.get("/disparar-robo")
 async def disparar(email: str, background_tasks: BackgroundTasks, user_id: str = Cookie(None)):
     if not user_id: raise HTTPException(status_code=401)
     
-    # SEGURANÇA: Verifica se a conta realmente pertence a quem está pedindo
-    check = supabase.table("contas_paciente").select("id").eq("email_alvo", email).eq("owner_id", user_id).execute()
-    if not check.data:
-        raise HTTPException(status_code=403, detail="Acesso negado a esta conta.")
+    # Valida se o email pertence ao usuário logado
+    check = supabase.table("contas_paciente").select("id").eq("email", email).eq("owner_id", user_id).execute()
+    if not check.data: raise HTTPException(status_code=403)
 
     background_tasks.add_task(rodar_solicitacao_otp, email)
     return {"status": "started"}
@@ -196,8 +195,7 @@ async def disparar(email: str, background_tasks: BackgroundTasks, user_id: str =
 async def get_otp(email: str, user_id: str = Cookie(None)):
     if not user_id: raise HTTPException(status_code=401)
     
-    # SEGURANÇA: Só entrega o OTP se for o dono da conta
-    check = supabase.table("contas_paciente").select("id").eq("email_alvo", email).eq("owner_id", user_id).execute()
+    check = supabase.table("contas_paciente").select("id").eq("email", email).eq("owner_id", user_id).execute()
     if check.data:
         return {"otp": r.get(f"otp:{email}")}
     return {"otp": None}
@@ -207,11 +205,21 @@ async def webhook(request: Request):
     form = await request.form()
     email_html = form.get("html", "")
     email_to = form.get("to", "").lower()
-    email_match = re.search(r'[\w\.-]+@[\w\.-]+', email_to)
-    if email_match:
-        target = email_match.group(0)
+    match_to = re.search(r'[\w\.-]+@[\w\.-]+', email_to)
+    
+    if match_to:
+        alvo = match_to.group(0)
+        # Tenta pegar o código entre as tags de cor específicas ou o primeiro bloco de 6 dígitos
         otp_match = re.search(r'color:#191847;">(\d{6})</p>', email_html)
         otp = otp_match.group(1) if otp_match else None
+        
+        if not otp:
+            # Fallback para qualquer sequência de 6 dígitos no texto
+            clean_text = re.sub('<[^<]+?>', '', email_html)
+            fallback = re.search(r'\b\d{6}\b', clean_text)
+            otp = fallback.group(0) if fallback else None
+
         if otp:
-            r.set(f"otp:{target}", otp, ex=180)
+            r.set(f"otp:{alvo}", otp, ex=180)
+            print(f"📩 Webhook: OTP {otp} salvo para {alvo}")
     return {"status": "ok"}
