@@ -194,12 +194,15 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
             status_txt = t['status_em_uso']
             status_cor = "#d93025"
             
-            # Cálculo de horário de liberação para o Tooltip
-            liberacao_dt = datetime.datetime.now() + datetime.timedelta(seconds=ttl)
-            horario_liberacao = liberacao_dt.strftime("%H:%M")
-            tooltip_msg = f"{t['tooltip_bloqueio']}{horario_liberacao}"
-            
-            btn_html = f"<button style='background:#ccc; cursor:help;' disabled title='{tooltip_msg}'>{t['btn_bloqueado']} ({ttl//60}m)</button>"
+            # Aqui embutimos os atributos data-ttl e data-msg no botão, junto com o novo wrapper para a janelinha
+            btn_html = f"""
+            <div class="tooltip-wrapper">
+                <button class="btn-lock" style="background:#ccc; cursor:help;" disabled data-ttl="{ttl}" data-msg="{t['tooltip_bloqueio']}">
+                    {t['btn_bloqueado']} ({ttl//60}m)
+                </button>
+                <span class="tooltip-text">Calculando...</span>
+            </div>
+            """
         else:
             status_txt = t['status_disponivel']
             status_cor = "#1e7e34"
@@ -247,6 +250,12 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
             .logout {{ color: var(--cor-azul-escuro); text-decoration: none; font-weight: bold; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; }}
             .lendo {{ animation: pulsar 1.5s infinite ease-in-out; }}
             @keyframes pulsar {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.3; }} 100% {{ opacity: 1; }} }}
+            
+            /* CSS NOVO DO TOOLTIP CUSTOMIZADO */
+            .tooltip-wrapper {{ position: relative; display: inline-block; }}
+            .tooltip-text {{ visibility: hidden; background-color: var(--cor-azul-escuro); color: #fff; text-align: center; border-radius: 8px; padding: 12px 16px; position: absolute; z-index: 10; bottom: 130%; left: 50%; transform: translateX(-50%); opacity: 0; transition: opacity 0.3s, bottom 0.3s; width: max-content; max-width: 250px; font-size: 13px; font-weight: 500; line-height: 1.4; box-shadow: 0px 5px 15px rgba(0,0,0,0.2); pointer-events: none; }}
+            .tooltip-text::after {{ content: ""; position: absolute; top: 100%; left: 50%; margin-left: -6px; border-width: 6px; border-style: solid; border-color: var(--cor-azul-escuro) transparent transparent transparent; }}
+            .tooltip-wrapper:hover .tooltip-text {{ visibility: visible; opacity: 1; bottom: 140%; }}
         </style>
     </head>
     <body>
@@ -266,6 +275,27 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
             </div>
         </div>
         <script>
+            // Lógica nova: Processa o tempo do Tooltip direto no navegador do usuário
+            window.addEventListener('DOMContentLoaded', () => {{
+                const wrappers = document.querySelectorAll('.tooltip-wrapper');
+                wrappers.forEach(wrapper => {{
+                    const btn = wrapper.querySelector('.btn-lock');
+                    const tooltipText = wrapper.querySelector('.tooltip-text');
+                    if (btn && tooltipText) {{
+                        const ttl = parseInt(btn.getAttribute('data-ttl'));
+                        const msgBase = btn.getAttribute('data-msg');
+                        
+                        // Soma os segundos ao horário atual local
+                        const tempoLiberacao = new Date(Date.now() + (ttl * 1000));
+                        const horas = tempoLiberacao.getHours().toString().padStart(2, '0');
+                        const minutos = tempoLiberacao.getMinutes().toString().padStart(2, '0');
+                        
+                        // Injeta o texto na janelinha popup
+                        tooltipText.innerText = msgBase + horas + ":" + minutos;
+                    }}
+                }});
+            }});
+
             let poll;
             async function monitorar(email) {{
                 await fetch('/soft-lock?email=' + encodeURIComponent(email));
