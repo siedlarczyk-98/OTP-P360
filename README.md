@@ -104,7 +104,7 @@ O sistema depende de duas tabelas principais:
 
 ## 🏗️ Arquitetura do Sistema
 
-O diagrama abaixo ilustra como os diferentes serviços (FastAPI, Redis, Supabase, SendGrid e a Plataforma EAD) se comunicam para garantir que o código OTP seja entregue com segurança e que os acessos não entrem em conflito.
+O diagrama abaixo ilustra como os diferentes serviços (FastAPI, Redis, Supabase, SendGrid e a Plataforma Paciente 360) se comunicam para garantir que o código OTP seja entregue com segurança e que os acessos não entrem em conflito.
 
 ```mermaid
 graph TD
