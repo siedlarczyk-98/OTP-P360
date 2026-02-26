@@ -3,6 +3,7 @@ import re
 import redis
 import time
 import asyncio
+import datetime
 from fastapi import FastAPI, Request, HTTPException, Cookie, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
@@ -50,7 +51,7 @@ TRADUCOES = {
         "placeholder_senha": "Senha",
         "status_disponivel": "🟢 Disponível",
         "status_em_uso": "🔴 Em uso",
-        "msg_bloqueio": "Esta conta está em uso ou em cooldown de segurança."
+        "tooltip_bloqueio": "Esta licença está em uso por outro usuário - o uso será liberado às "
     },
     "en": {
         "titulo": "OTP Tracking Hub",
@@ -73,7 +74,8 @@ TRADUCOES = {
         "placeholder_email": "Email",
         "placeholder_senha": "Password",
         "status_disponivel": "🟢 Available",
-        "status_em_uso": "🔴 In Use"
+        "status_em_uso": "🔴 In Use",
+        "tooltip_bloqueio": "This license is in use by another user - it will be released at "
     },
     "es": {
         "titulo": "Centro de Rastreo OTP",
@@ -96,7 +98,8 @@ TRADUCOES = {
         "placeholder_email": "Correo electrónico",
         "placeholder_senha": "Contraseña",
         "status_disponivel": "🟢 Disponible",
-        "status_em_uso": "🔴 En uso"
+        "status_em_uso": "🔴 En uso",
+        "tooltip_bloqueio": "Esta licencia está en uso por otro usuario - el acceso se liberará a las "
     }
 }
 
@@ -109,10 +112,8 @@ def get_idioma(request: Request):
 @app.get("/", response_class=HTMLResponse)
 async def login_page(request: Request, user_id: str = Cookie(None)):
     if user_id: return RedirectResponse(url="/dashboard")
-    
     lang = get_idioma(request)
     t = TRADUCOES[lang]
-    
     return f"""
     <html>
         <head>
@@ -161,10 +162,8 @@ async def auth_login(data: LoginData, response: Response):
         res = supabase.auth.sign_in_with_password({"email": data.email, "password": data.password})
         if res.user:
             uid = res.user.id
-            # SESSÃO ÚNICA: Gera token novo
             token = str(time.time())
             r.set(f"active_session:{uid}", token, ex=86400)
-            
             response.set_cookie(key="user_id", value=uid, httponly=True, max_age=86400)
             response.set_cookie(key="session_token", value=token, httponly=True, max_age=86400)
             return {"status": "ok"}
@@ -180,9 +179,7 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
         res.delete_cookie("session_token")
         return res
 
-    # Log de atividade
     r.set(f"last_activity:{user_id}", int(time.time()), ex=86400)
-
     lang = get_idioma(request)
     t = TRADUCOES[lang]
     contas = supabase.table("contas_paciente").select("*").eq("owner_id", user_id).execute()
@@ -196,7 +193,13 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
         if ttl > 0:
             status_txt = t['status_em_uso']
             status_cor = "#d93025"
-            btn_html = f"<button style='background:#ccc; cursor:not-allowed;' disabled>{t['btn_bloqueado']} ({ttl//60}m)</button>"
+            
+            # Cálculo de horário de liberação para o Tooltip
+            liberacao_dt = datetime.datetime.now() + datetime.timedelta(seconds=ttl)
+            horario_liberacao = liberacao_dt.strftime("%H:%M")
+            tooltip_msg = f"{t['tooltip_bloqueio']}{horario_liberacao}"
+            
+            btn_html = f"<button style='background:#ccc; cursor:help;' disabled title='{tooltip_msg}'>{t['btn_bloqueado']} ({ttl//60}m)</button>"
         else:
             status_txt = t['status_disponivel']
             status_cor = "#1e7e34"
@@ -218,7 +221,6 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
         '''
         
     if not contas.data: cards_html = f"<p style='text-align:center; color:#666;'>{t['msg_vazio']}</p>"
-
     instr_html = "".join([f"<li>{item}</li>" for item in t['instrucoes']])
 
     return f"""
@@ -233,22 +235,16 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
             .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; background: white; padding: 15px 20px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }}
             .instrucoes {{ background: white; border-left: 5px solid var(--cor-laranja); padding: 20px; border-radius: 8px; margin-bottom: 25px; line-height: 1.6; }}
             .instrucoes a {{ color: var(--cor-laranja); font-weight: bold; text-decoration: underline; }}
-            
-            /* Três Colunas */
             .card-conta {{ background: white; padding: 15px 20px; border-radius: 12px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 2px 8px rgba(30,58,95,0.08); border-left: 4px solid var(--cor-laranja); }}
             .info-conta {{ flex: 1.5; text-align: left; }}
             .status-badge {{ flex: 1; text-align: center; font-size: 13px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }}
             .acao-conta {{ flex: 1.2; text-align: right; }}
-            
             button {{ min-width: 140px; background: var(--cor-laranja); color: white; border: none; padding: 10px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; transition: all 0.2s; }}
             button:not(:disabled):hover {{ background: var(--cor-laranja-hover); }}
-            
             .terminal {{ background: var(--cor-azul-escuro); color: white; padding: 35px 20px; border-radius: 12px; text-align: center; margin-top: 25px; border-bottom: 5px solid var(--cor-laranja); }}
             #status {{ font-size: 14px; opacity: 0.9; text-transform: uppercase; letter-spacing: 1px; }}
             #otp {{ font-size: 64px; display: block; margin-top: 15px; letter-spacing: 12px; font-weight: 900; transition: color 0.3s; }}
             .logout {{ color: var(--cor-azul-escuro); text-decoration: none; font-weight: bold; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; }}
-            
-            /* Animação de Pulsação */
             .lendo {{ animation: pulsar 1.5s infinite ease-in-out; }}
             @keyframes pulsar {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.3; }} 100% {{ opacity: 1; }} }}
         </style>
@@ -272,19 +268,13 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
         <script>
             let poll;
             async function monitorar(email) {{
-                // Lock preventivo de 15 min
                 await fetch('/soft-lock?email=' + encodeURIComponent(email));
-                
                 const terminal = document.querySelector('.terminal');
                 terminal.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
-
                 document.getElementById('status').innerText = "{t['status_lendo']}" + email;
                 const otpElem = document.getElementById('otp');
                 otpElem.innerText = "......";
                 otpElem.classList.add('lendo');
-                otpElem.style.color = "white";
-                otpElem.style.textShadow = "none";
-
                 if(poll) clearInterval(poll);
                 poll = setInterval(async () => {{
                     const res = await fetch('/get-raw-otp?email=' + encodeURIComponent(email));
@@ -293,10 +283,8 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
                         otpElem.classList.remove('lendo');
                         otpElem.innerText = data.otp;
                         otpElem.style.color = "var(--cor-verde-menta)";
-                        otpElem.style.textShadow = "0 0 15px rgba(0, 233, 169, 0.4)";
                         document.getElementById('status').innerText = "{t['status_sucesso']}";
                         clearInterval(poll);
-                        
                         setTimeout(() => location.reload(), 5000); 
                     }}
                 }}, 3000);
@@ -306,47 +294,32 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
     </html>
     """
 
-# --- OPERAÇÕES E WEBHOOKS ---
 @app.get("/soft-lock")
 async def soft_lock(email: str):
-    r.set(f"lock:{email.lower()}", "pendente", ex=900) # 15 min
+    r.set(f"lock:{email.lower()}", "pendente", ex=900)
     return {"status": "ok"}
-
 
 @app.post("/webhook-sistema")
 async def webhook_sistema(request: Request):
-    # 1. Pega as chaves direto da URL (Query Parameters)
     client_id = request.query_params.get("client_id")
     client_key = request.query_params.get("client_key")
-
     data = await request.json()
-    
-    # Fallback: Se não estiver na URL, tenta achar no Header ou Body
     if not client_id:
         client_id = request.headers.get("x-client-id") or data.get("client_id")
     if not client_key:
         client_key = request.headers.get("x-client-key") or data.get("client_key")
-
     if not client_id or not client_key:
-        raise HTTPException(status_code=401, detail="Credenciais ausentes na URL.")
-
-    # 2. Valida as chaves no banco de dados
+        raise HTTPException(status_code=401, detail="Credenciais ausentes.")
     check_auth = supabase.table("api_keys").select("id").eq("client_id", client_id).eq("client_key", client_key).execute()
-    
     if not check_auth.data:
-        raise HTTPException(status_code=403, detail="Acesso Negado. Credenciais inválidas.")
-
-    # 3. Lógica de Negócio (Hard Lock)
+        raise HTTPException(status_code=403, detail="Acesso Negado.")
     email = data.get("user", {}).get("email", "").lower().strip()
     progresso = data.get("progresso", 0)
-
     if email and progresso > 0:
-        r.set(f"lock:{email}", "sucesso", ex=7200) # 2h
-        print(f"🔒 [LOCK] Conta {email} travada por 2h via Webhook (Cliente: {client_id})")
-        return {"status": "locked", "message": "Progresso registrado."}
-        
-    return {"status": "ignored", "message": "Sem e-mail ou progresso."}
-
+        r.set(f"lock:{email}", "sucesso", ex=7200) # 2h Hard Lock
+        print(f"🔒 [LOCK] Conta {email} travada por 2h.")
+        return {"status": "locked", "message": "Sucesso"}
+    return {"status": "ignored"}
 
 @app.get("/get-raw-otp")
 async def get_otp(email: str, user_id: str = Cookie(None)):
