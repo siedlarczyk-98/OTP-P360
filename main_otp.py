@@ -1,6 +1,7 @@
 import os
 import re
 import redis
+import time
 import asyncio
 from fastapi import FastAPI, Request, HTTPException, Cookie, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -25,7 +26,7 @@ class LoginData(BaseModel):
 LOGO_URL = "https://biabapecceelzvwwunvm.supabase.co/storage/v1/object/public/icons/logo.png"
 FAVICON_URL = "https://biabapecceelzvwwunvm.supabase.co/storage/v1/object/public/icons/favicon.ico"
 
-# --- DICIONÁRIO DE TRADUÇÃO (COM LINKS INCORPORADOS) ---
+# --- DICIONÁRIO DE TRADUÇÃO ---
 TRADUCOES = {
     "pt": {
         "titulo": "Central de Rastreamento OTP",
@@ -38,6 +39,7 @@ TRADUCOES = {
             "Copie o código abaixo e cole no portal oficial."
         ],
         "btn_rastrear": "Rastrear OTP",
+        "btn_bloqueado": "Bloqueado",
         "status_inicial": "Aguardando rastreamento...",
         "status_lendo": "🔎 Rastreando e-mail para: ",
         "status_sucesso": "CÓDIGO LOCALIZADO! COPIE ABAIXO:",
@@ -45,7 +47,10 @@ TRADUCOES = {
         "logout": "Sair",
         "btn_ok": "Entrar",
         "placeholder_email": "E-mail",
-        "placeholder_senha": "Senha"
+        "placeholder_senha": "Senha",
+        "status_disponivel": "🟢 Disponível",
+        "status_em_uso": "🔴 Em uso",
+        "msg_bloqueio": "Esta conta está em uso ou em cooldown de segurança."
     },
     "en": {
         "titulo": "OTP Tracking Hub",
@@ -58,6 +63,7 @@ TRADUCOES = {
             "Copy the code below and paste it into the official portal."
         ],
         "btn_rastrear": "Track OTP",
+        "btn_bloqueado": "Locked",
         "status_inicial": "Waiting for tracking...",
         "status_lendo": "🔎 Tracking email for: ",
         "status_sucesso": "CODE LOCATED! COPY BELOW:",
@@ -65,7 +71,9 @@ TRADUCOES = {
         "logout": "Logout",
         "btn_ok": "Login",
         "placeholder_email": "Email",
-        "placeholder_senha": "Password"
+        "placeholder_senha": "Password",
+        "status_disponivel": "🟢 Available",
+        "status_em_uso": "🔴 In Use"
     },
     "es": {
         "titulo": "Centro de Rastreo OTP",
@@ -78,6 +86,7 @@ TRADUCOES = {
             "Copie el código a continuación y péguelo en el portal oficial."
         ],
         "btn_rastrear": "Rastrear OTP",
+        "btn_bloqueado": "Bloqueado",
         "status_inicial": "Esperando rastreo...",
         "status_lendo": "🔎 Rastreando correo para: ",
         "status_sucesso": "¡CÓDIGO LOCALIZADO! COPIE ABAJO:",
@@ -85,7 +94,9 @@ TRADUCOES = {
         "logout": "Salir",
         "btn_ok": "Ingresar",
         "placeholder_email": "Correo electrónico",
-        "placeholder_senha": "Contraseña"
+        "placeholder_senha": "Contraseña",
+        "status_disponivel": "🟢 Disponible",
+        "status_em_uso": "🔴 En uso"
     }
 }
 
@@ -149,15 +160,28 @@ async def auth_login(data: LoginData, response: Response):
     try:
         res = supabase.auth.sign_in_with_password({"email": data.email, "password": data.password})
         if res.user:
-            response.set_cookie(key="user_id", value=res.user.id, httponly=True, max_age=3600 * 12)
+            uid = res.user.id
+            # SESSÃO ÚNICA: Gera token novo
+            token = str(time.time())
+            r.set(f"active_session:{uid}", token, ex=86400)
+            
+            response.set_cookie(key="user_id", value=uid, httponly=True, max_age=86400)
+            response.set_cookie(key="session_token", value=token, httponly=True, max_age=86400)
             return {"status": "ok"}
     except: pass
     raise HTTPException(status_code=401)
 
 # --- DASHBOARD ---
 @app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request, user_id: str = Cookie(None)):
-    if not user_id: return RedirectResponse("/")
+async def dashboard(request: Request, user_id: str = Cookie(None), session_token: str = Cookie(None)):
+    if not user_id or r.get(f"active_session:{user_id}") != session_token:
+        res = RedirectResponse("/")
+        res.delete_cookie("user_id")
+        res.delete_cookie("session_token")
+        return res
+
+    # Log de atividade
+    r.set(f"last_activity:{user_id}", int(time.time()), ex=86400)
 
     lang = get_idioma(request)
     t = TRADUCOES[lang]
@@ -167,12 +191,32 @@ async def dashboard(request: Request, user_id: str = Cookie(None)):
     for c in contas.data:
         nome = c.get('nome_amigavel') or 'Unidade'
         email_conta = c.get('email')
+        ttl = r.ttl(f"lock:{email_conta}")
+        
+        if ttl > 0:
+            status_txt = t['status_em_uso']
+            status_cor = "#d93025"
+            btn_html = f"<button style='background:#ccc; cursor:not-allowed;' disabled>{t['btn_bloqueado']} ({ttl//60}m)</button>"
+        else:
+            status_txt = t['status_disponivel']
+            status_cor = "#1e7e34"
+            btn_html = f"<button onclick=\"monitorar('{email_conta}')\">{t['btn_rastrear']}</button>"
+
         cards_html += f'''
         <div class="card-conta">
-            <div><strong>{nome}</strong><br><small style="color: #666;">{email_conta}</small></div>
-            <button onclick="monitorar('{email_conta}')">{t['btn_rastrear']}</button>
+            <div class="info-conta">
+                <strong>{nome}</strong><br>
+                <small style="color: #666;">{email_conta}</small>
+            </div>
+            <div class="status-badge" style="color: {status_cor};">
+                {status_txt}
+            </div>
+            <div class="acao-conta">
+                {btn_html}
+            </div>
         </div>
         '''
+        
     if not contas.data: cards_html = f"<p style='text-align:center; color:#666;'>{t['msg_vazio']}</p>"
 
     instr_html = "".join([f"<li>{item}</li>" for item in t['instrucoes']])
@@ -189,10 +233,19 @@ async def dashboard(request: Request, user_id: str = Cookie(None)):
             .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; background: white; padding: 15px 20px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }}
             .instrucoes {{ background: white; border-left: 5px solid var(--cor-laranja); padding: 20px; border-radius: 8px; margin-bottom: 25px; line-height: 1.6; }}
             .instrucoes a {{ color: var(--cor-laranja); font-weight: bold; text-decoration: underline; }}
-            .card-conta {{ background: white; padding: 15px 20px; border-radius: 12px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 8px rgba(30,58,95,0.08); border-left: 4px solid var(--cor-laranja); }}
-            button {{ background: var(--cor-laranja); color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; }}
+            
+            /* Três Colunas */
+            .card-conta {{ background: white; padding: 15px 20px; border-radius: 12px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 2px 8px rgba(30,58,95,0.08); border-left: 4px solid var(--cor-laranja); }}
+            .info-conta {{ flex: 1.5; text-align: left; }}
+            .status-badge {{ flex: 1; text-align: center; font-size: 13px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }}
+            .acao-conta {{ flex: 1.2; text-align: right; }}
+            
+            button {{ min-width: 140px; background: var(--cor-laranja); color: white; border: none; padding: 10px 15px; border-radius: 8px; cursor: pointer; font-weight: bold; transition: all 0.2s; }}
+            button:not(:disabled):hover {{ background: var(--cor-laranja-hover); }}
+            
             .terminal {{ background: var(--cor-azul-escuro); color: white; padding: 35px 20px; border-radius: 12px; text-align: center; margin-top: 25px; border-bottom: 5px solid var(--cor-laranja); }}
-            #otp {{ font-size: 64px; display: block; margin-top: 15px; letter-spacing: 12px; font-weight: 900; }}
+            #status {{ font-size: 14px; opacity: 0.9; text-transform: uppercase; letter-spacing: 1px; }}
+            #otp {{ font-size: 64px; display: block; margin-top: 15px; letter-spacing: 12px; font-weight: 900; transition: color 0.3s; }}
             .logout {{ color: var(--cor-azul-escuro); text-decoration: none; font-weight: bold; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; }}
             
             /* Animação de Pulsação */
@@ -218,7 +271,10 @@ async def dashboard(request: Request, user_id: str = Cookie(None)):
         </div>
         <script>
             let poll;
-            function monitorar(email) {{
+            async function monitorar(email) {{
+                // Lock preventivo de 15 min
+                await fetch('/soft-lock?email=' + encodeURIComponent(email));
+                
                 const terminal = document.querySelector('.terminal');
                 terminal.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
 
@@ -240,6 +296,8 @@ async def dashboard(request: Request, user_id: str = Cookie(None)):
                         otpElem.style.textShadow = "0 0 15px rgba(0, 233, 169, 0.4)";
                         document.getElementById('status').innerText = "{t['status_sucesso']}";
                         clearInterval(poll);
+                        
+                        setTimeout(() => location.reload(), 5000); 
                     }}
                 }}, 3000);
             }}
@@ -248,7 +306,44 @@ async def dashboard(request: Request, user_id: str = Cookie(None)):
     </html>
     """
 
-# --- OPERAÇÕES ---
+# --- OPERAÇÕES E WEBHOOKS ---
+@app.get("/soft-lock")
+async def soft_lock(email: str):
+    r.set(f"lock:{email.lower()}", "pendente", ex=900) # 15 min
+    return {"status": "ok"}
+
+
+# --- NOVO WEBHOOK COM AUTENTICAÇÃO VIA SUPABASE ---
+@app.post("/webhook-sistema")
+async def webhook_sistema(request: Request):
+    data = await request.json()
+    
+    # 1. Captura as chaves. Permite checar primeiro os Headers e faz fallback para o JSON Body
+    client_id = request.headers.get("x-client-id") or data.get("client_id")
+    client_key = request.headers.get("x-client-key") or data.get("client_key")
+
+    if not client_id or not client_key:
+        raise HTTPException(status_code=401, detail="Credenciais de autenticacao (client_id e client_key) ausentes.")
+
+    # 2. Valida as chaves no banco de dados (Tabela "clientes")
+    # Substitua "clientes" pelo nome correto da sua tabela caso seja diferente
+    check_auth = supabase.table("clientes").select("id").eq("client_id", client_id).eq("client_key", client_key).execute()
+    
+    if not check_auth.data:
+        raise HTTPException(status_code=403, detail="Acesso Negado. Credenciais invalidas ou revogadas.")
+
+    # 3. Lógica de Negócio: Se validado, procura pelo progresso
+    email = data.get("user", {}).get("email", "").lower().strip()
+    progresso = data.get("progresso", 0)
+
+    if email and progresso > 0:
+        r.set(f"lock:{email}", "sucesso", ex=7200) # Hard Lock de 2h
+        print(f"🔒 [LOCK] Conta {email} travada por 2h via Webhook (Cliente validado: {client_id})")
+        return {"status": "locked", "message": "Progresso registrado e conta protegida."}
+        
+    return {"status": "ignored", "message": "Sem e-mail ou progresso insuficiente."}
+
+
 @app.get("/get-raw-otp")
 async def get_otp(email: str, user_id: str = Cookie(None)):
     if not user_id: return {"otp": None}
@@ -259,7 +354,7 @@ async def get_otp(email: str, user_id: str = Cookie(None)):
     return {"otp": None}
 
 @app.post("/webhook-sendgrid")
-async def webhook(request: Request):
+async def webhook_sendgrid(request: Request):
     form = await request.form()
     email_html, email_to = form.get("html", ""), form.get("to", "").lower()
     match_to = re.search(r'[\w\.-]+@[\w\.-]+', email_to)
@@ -273,4 +368,5 @@ async def webhook(request: Request):
 @app.get("/logout")
 async def logout(response: Response):
     response.delete_cookie("user_id")
+    response.delete_cookie("session_token")
     return RedirectResponse("/")
