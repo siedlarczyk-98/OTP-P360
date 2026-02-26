@@ -313,35 +313,39 @@ async def soft_lock(email: str):
     return {"status": "ok"}
 
 
-# --- NOVO WEBHOOK COM AUTENTICAÇÃO VIA SUPABASE ---
 @app.post("/webhook-sistema")
 async def webhook_sistema(request: Request):
+    # 1. Pega as chaves direto da URL (Query Parameters)
+    client_id = request.query_params.get("client_id")
+    client_key = request.query_params.get("client_key")
+
     data = await request.json()
     
-    # 1. Captura as chaves. Permite checar primeiro os Headers e faz fallback para o JSON Body
-    client_id = request.headers.get("x-client-id") or data.get("client_id")
-    client_key = request.headers.get("x-client-key") or data.get("client_key")
+    # Fallback: Se não estiver na URL, tenta achar no Header ou Body
+    if not client_id:
+        client_id = request.headers.get("x-client-id") or data.get("client_id")
+    if not client_key:
+        client_key = request.headers.get("x-client-key") or data.get("client_key")
 
     if not client_id or not client_key:
-        raise HTTPException(status_code=401, detail="Credenciais de autenticacao (client_id e client_key) ausentes.")
+        raise HTTPException(status_code=401, detail="Credenciais ausentes na URL.")
 
-    # 2. Valida as chaves no banco de dados (Tabela "api_keys")
-    # Substitua "clientes" pelo nome correto da sua tabela caso seja diferente
+    # 2. Valida as chaves no banco de dados
     check_auth = supabase.table("api_keys").select("id").eq("client_id", client_id).eq("client_key", client_key).execute()
     
     if not check_auth.data:
-        raise HTTPException(status_code=403, detail="Acesso Negado. Credenciais invalidas ou revogadas.")
+        raise HTTPException(status_code=403, detail="Acesso Negado. Credenciais inválidas.")
 
-    # 3. Lógica de Negócio: Se validado, procura pelo progresso
+    # 3. Lógica de Negócio (Hard Lock)
     email = data.get("user", {}).get("email", "").lower().strip()
     progresso = data.get("progresso", 0)
 
     if email and progresso > 0:
-        r.set(f"lock:{email}", "sucesso", ex=7200) # Hard Lock de 2h
-        print(f"🔒 [LOCK] Conta {email} travada por 2h via Webhook (Cliente validado: {client_id})")
-        return {"status": "locked", "message": "Progresso registrado e conta protegida."}
+        r.set(f"lock:{email}", "sucesso", ex=7200) # 2h
+        print(f"🔒 [LOCK] Conta {email} travada por 2h via Webhook (Cliente: {client_id})")
+        return {"status": "locked", "message": "Progresso registrado."}
         
-    return {"status": "ignored", "message": "Sem e-mail ou progresso insuficiente."}
+    return {"status": "ignored", "message": "Sem e-mail ou progresso."}
 
 
 @app.get("/get-raw-otp")
