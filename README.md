@@ -116,7 +116,7 @@ graph TD
 
     %% Componentes
     User(( Aluno / Frontend)):::frontend
-    Paciente 360 [Plataforma]:::external
+    P360[Paciente 360 - Plataforma]:::external
     SendGrid[ SendGrid]:::external
     
     FastAPI{Servidor FastAPI}:::backend
@@ -139,6 +139,6 @@ graph TD
     FastAPI -- "Lê OTP" --> Redis
 
     %% Fluxo de Bloqueio Definitivo
-    EAD -- "9. Webhook de Progresso" --> FastAPI
+    P360 -- "9. Webhook de Progresso" --> FastAPI
     FastAPI -- "10. Valida API Keys" --> Supabase
     FastAPI -- "11. Aplica Hard Lock (2h)" --> Redis
