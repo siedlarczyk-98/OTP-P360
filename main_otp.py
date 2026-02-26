@@ -325,9 +325,9 @@ async def webhook_sistema(request: Request):
     if not client_id or not client_key:
         raise HTTPException(status_code=401, detail="Credenciais de autenticacao (client_id e client_key) ausentes.")
 
-    # 2. Valida as chaves no banco de dados (Tabela "clientes")
+    # 2. Valida as chaves no banco de dados (Tabela "api_keys")
     # Substitua "clientes" pelo nome correto da sua tabela caso seja diferente
-    check_auth = supabase.table("clientes").select("id").eq("client_id", client_id).eq("client_key", client_key).execute()
+    check_auth = supabase.table("api_keys").select("id").eq("client_id", client_id).eq("client_key", client_key).execute()
     
     if not check_auth.data:
         raise HTTPException(status_code=403, detail="Acesso Negado. Credenciais invalidas ou revogadas.")
