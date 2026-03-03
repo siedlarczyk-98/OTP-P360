@@ -190,11 +190,12 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
         email_conta = c.get('email')
         ttl = r.ttl(f"lock:{email_conta}")
         
+        # Variável nova para ordenação: 1 para disponível, 0 para bloqueado
+        status_sort = 1 if ttl <= 0 else 0
+        
         if ttl > 0:
             status_txt = t['status_em_uso']
             status_cor = "#d93025"
-            
-            # Aqui embutimos os atributos data-ttl e data-msg no botão, junto com o novo wrapper para a janelinha
             btn_html = f"""
             <div class="tooltip-wrapper">
                 <button class="btn-lock" style="background:#ccc; cursor:help;" disabled data-ttl="{ttl}" data-msg="{t['tooltip_bloqueio']}">
@@ -208,8 +209,9 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
             status_cor = "#1e7e34"
             btn_html = f"<button onclick=\"monitorar('{email_conta}')\">{t['btn_rastrear']}</button>"
 
+        # Adicionando data-nome e data-status na div raiz do card
         cards_html += f'''
-        <div class="card-conta">
+        <div class="card-conta" data-nome="{nome.lower()}" data-status="{status_sort}">
             <div class="info-conta">
                 <strong>{nome}</strong><br>
                 <small style="color: #666;">{email_conta}</small>
@@ -251,6 +253,13 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
             .lendo {{ animation: pulsar 1.5s infinite ease-in-out; }}
             @keyframes pulsar {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.3; }} 100% {{ opacity: 1; }} }}
             
+            /* CSS NOVO DA BARRA DE BUSCA E ORDENAÇÃO */
+            .toolbar {{ display: flex; gap: 10px; margin-bottom: 20px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: white; padding: 15px 20px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }}
+            .busca-input {{ flex: 1; min-width: 200px; margin: 0; padding: 10px 15px; border-radius: 8px; border: 1px solid #ddd; outline-color: var(--cor-laranja); font-size: 14px; }}
+            .botoes-ordem {{ display: flex; gap: 8px; }}
+            .btn-filtro {{ background: #e2e8f0; color: var(--cor-azul-escuro); padding: 10px 15px; min-width: auto; font-size: 13px; font-weight: 600; }}
+            .btn-filtro:hover {{ background: #cbd5e1; }}
+            
             /* CSS NOVO DO TOOLTIP CUSTOMIZADO */
             .tooltip-wrapper {{ position: relative; display: inline-block; }}
             .tooltip-text {{ visibility: hidden; background-color: var(--cor-azul-escuro); color: #fff; text-align: center; border-radius: 8px; padding: 12px 16px; position: absolute; z-index: 10; bottom: 130%; left: 50%; transform: translateX(-50%); opacity: 0; transition: opacity 0.3s, bottom 0.3s; width: max-content; max-width: 250px; font-size: 13px; font-weight: 500; line-height: 1.4; box-shadow: 0px 5px 15px rgba(0,0,0,0.2); pointer-events: none; }}
@@ -268,14 +277,26 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
                 <strong style="color: var(--cor-azul-escuro);">{t['passo_a_passo']}</strong>
                 <ol style="margin-top: 10px;">{instr_html}</ol>
             </div>
-            {cards_html}
+            
+            <div class="toolbar">
+                <input type="text" id="input-busca" class="busca-input" placeholder="🔍 Buscar unidade...">
+                <div class="botoes-ordem">
+                    <button onclick="ordenarCards('nome')" class="btn-filtro">🔤 A-Z</button>
+                    <button onclick="ordenarCards('status')" class="btn-filtro">🟢 Status</button>
+                </div>
+            </div>
+
+            <div id="lista-cards">
+                {cards_html}
+            </div>
+            
             <div class="terminal">
                 <div id="status">{t['status_inicial']}</div>
                 <div id="otp">------</div>
             </div>
         </div>
         <script>
-            // Lógica nova: Processa o tempo do Tooltip direto no navegador do usuário
+            // --- TOOLTIP ---
             window.addEventListener('DOMContentLoaded', () => {{
                 const wrappers = document.querySelectorAll('.tooltip-wrapper');
                 wrappers.forEach(wrapper => {{
@@ -285,17 +306,16 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
                         const ttl = parseInt(btn.getAttribute('data-ttl'));
                         const msgBase = btn.getAttribute('data-msg');
                         
-                        // Soma os segundos ao horário atual local
                         const tempoLiberacao = new Date(Date.now() + (ttl * 1000));
                         const horas = tempoLiberacao.getHours().toString().padStart(2, '0');
                         const minutos = tempoLiberacao.getMinutes().toString().padStart(2, '0');
                         
-                        // Injeta o texto na janelinha popup
                         tooltipText.innerText = msgBase + horas + ":" + minutos;
                     }}
                 }});
             }});
 
+            // --- MONITORAR OTP ---
             let poll;
             async function monitorar(email) {{
                 await fetch('/soft-lock?email=' + encodeURIComponent(email));
@@ -306,6 +326,7 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
                 otpElem.innerText = "......";
                 otpElem.classList.add('lendo');
                 if(poll) clearInterval(poll);
+                
                 poll = setInterval(async () => {{
                     const res = await fetch('/get-raw-otp?email=' + encodeURIComponent(email));
                     const data = await res.json();
@@ -318,6 +339,37 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
                         setTimeout(() => location.reload(), 5000); 
                     }}
                 }}, 3000);
+            }} 
+
+            // --- SISTEMA DE BUSCA ---
+            document.getElementById('input-busca').addEventListener('input', function(e) {{
+                const termo = e.target.value.toLowerCase();
+                const cards = document.querySelectorAll('.card-conta');
+                cards.forEach(card => {{
+                    const nome = card.getAttribute('data-nome');
+                    if(nome.includes(termo)) {{
+                        card.style.display = 'flex';
+                    }} else {{
+                        card.style.display = 'none';
+                    }}
+                }});
+            }});
+
+            // --- SISTEMA DE ORDENAÇÃO ---
+            function ordenarCards(criterio) {{
+                const containerLista = document.getElementById('lista-cards');
+                const cards = Array.from(containerLista.querySelectorAll('.card-conta'));
+                
+                cards.sort((a, b) => {{
+                    if (criterio === 'nome') {{
+                        return a.getAttribute('data-nome').localeCompare(b.getAttribute('data-nome'));
+                    }} else if (criterio === 'status') {{
+                        return parseInt(b.getAttribute('data-status')) - parseInt(a.getAttribute('data-status'));
+                    }}
+                }});
+                
+                containerLista.innerHTML = '';
+                cards.forEach(card => containerLista.appendChild(card));
             }}
         </script>
     </body>
