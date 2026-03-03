@@ -407,8 +407,13 @@ async def webhook_sendgrid(request: Request):
         print("[WEBHOOK] Tentativa de acesso com secret inválido.")
         raise HTTPException(status_code=403, detail="Acesso negado.")
 
-    form     = await request.form()
-    email_to = form.get("to", "").lower().strip()
+    form       = await request.form()
+    email_to   = form.get("to", "").lower().strip()
+    email_html = form.get("html", "")
+
+    # DEBUG TEMPORÁRIO — remover após confirmar funcionamento
+    print(f"[WEBHOOK DEBUG] to={email_to}")
+    print(f"[WEBHOOK DEBUG] html_snippet={email_html[:500]}")
 
     # Extrai o endereço de destino do campo "to"
     match_to = re.search(r'[\w\.-]+@[\w\.-]+', email_to)
@@ -423,7 +428,6 @@ async def webhook_sendgrid(request: Request):
         print(f"[WEBHOOK] Domínio não autorizado ignorado: {alvo}")
         return {"status": "ignored", "reason": "domínio não autorizado"}
 
-    email_html = form.get("html", "")
     otp_match  = re.search(r'color:#191847;">(\d{6})</p>', email_html)
     otp        = otp_match.group(1) if otp_match else None
 
