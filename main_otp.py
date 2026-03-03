@@ -9,6 +9,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from supabase import create_client, Client
 
+# FIX 9: Importar a biblioteca oficial do SendGrid para validação de assinatura
+from sendgrid.helpers.eventwebhook import EventWebhook, EventWebhookHeader
+
 app = FastAPI()
 
 # --- CONFIGURAÇÕES ---
@@ -18,6 +21,12 @@ r = redis.from_url(REDIS_URL, decode_responses=True)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# FIX 7: Flag de ambiente para ativar secure=True apenas em produção
+IS_PRODUCTION = os.getenv("ENV", "development") == "production"
+
+# FIX 9: Chave pública ECDSA fornecida pelo painel do SendGrid
+SENDGRID_WEBHOOK_PUBLIC_KEY = os.getenv("SENDGRID_WEBHOOK_PUBLIC_KEY")
 
 class LoginData(BaseModel):
     email: str
@@ -158,16 +167,20 @@ async def login_page(request: Request, user_id: str = Cookie(None)):
 
 @app.post("/auth/login")
 async def auth_login(data: LoginData, response: Response):
+    # FIX 6: Capturar a exceção com nome para poder logar o erro real
     try:
         res = supabase.auth.sign_in_with_password({"email": data.email, "password": data.password})
         if res.user:
             uid = res.user.id
             token = str(time.time())
             r.set(f"active_session:{uid}", token, ex=86400)
-            response.set_cookie(key="user_id", value=uid, httponly=True, max_age=86400)
-            response.set_cookie(key="session_token", value=token, httponly=True, max_age=86400)
+            # FIX 4 + FIX 7: Adicionar samesite="lax" e secure condicional por ambiente
+            response.set_cookie(key="user_id",       value=uid,   httponly=True, max_age=86400, samesite="lax", secure=IS_PRODUCTION)
+            response.set_cookie(key="session_token", value=token, httponly=True, max_age=86400, samesite="lax", secure=IS_PRODUCTION)
             return {"status": "ok"}
-    except: pass
+    except Exception as e:
+        # FIX 6: Logar o erro em vez de silenciá-lo
+        print(f"[AUTH ERROR] {type(e).__name__}: {e}")
     raise HTTPException(status_code=401)
 
 # --- DASHBOARD ---
@@ -189,8 +202,6 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
         nome = c.get('nome_amigavel') or 'Unidade'
         email_conta = c.get('email')
         ttl = r.ttl(f"lock:{email_conta}")
-        
-        # Variável nova para ordenação: 1 para disponível, 0 para bloqueado
         status_sort = 1 if ttl <= 0 else 0
         
         if ttl > 0:
@@ -207,9 +218,9 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
         else:
             status_txt = t['status_disponivel']
             status_cor = "#1e7e34"
+            # FIX 8: monitorar() agora faz POST internamente
             btn_html = f"<button onclick=\"monitorar('{email_conta}')\">{t['btn_rastrear']}</button>"
 
-        # Adicionando data-nome e data-status na div raiz do card
         cards_html += f'''
         <div class="card-conta" data-nome="{nome.lower()}" data-status="{status_sort}">
             <div class="info-conta">
@@ -233,7 +244,7 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
     <head>
         <title>{t['titulo']}</title>
         <link rel="icon" href="{FAVICON_URL}" type="image/x-icon">
-        <style>
+    <style>
             :root {{ --cor-laranja: #fd5e11; --cor-laranja-hover: #ff8502; --cor-azul-escuro: #1e3a5f; --cor-verde-menta: #00e9a9; }}
             body {{ font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 20px; color: #333; }}
             .container {{ max-width: 600px; margin: auto; }}
@@ -252,15 +263,11 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
             .logout {{ color: var(--cor-azul-escuro); text-decoration: none; font-weight: bold; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; }}
             .lendo {{ animation: pulsar 1.5s infinite ease-in-out; }}
             @keyframes pulsar {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.3; }} 100% {{ opacity: 1; }} }}
-            
-            /* CSS NOVO DA BARRA DE BUSCA E ORDENAÇÃO */
             .toolbar {{ display: flex; gap: 10px; margin-bottom: 20px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: white; padding: 15px 20px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }}
             .busca-input {{ flex: 1; min-width: 200px; margin: 0; padding: 10px 15px; border-radius: 8px; border: 1px solid #ddd; outline-color: var(--cor-laranja); font-size: 14px; }}
             .botoes-ordem {{ display: flex; gap: 8px; }}
             .btn-filtro {{ background: #e2e8f0; color: var(--cor-azul-escuro); padding: 10px 15px; min-width: auto; font-size: 13px; font-weight: 600; }}
             .btn-filtro:hover {{ background: #cbd5e1; }}
-            
-            /* CSS NOVO DO TOOLTIP CUSTOMIZADO */
             .tooltip-wrapper {{ position: relative; display: inline-block; }}
             .tooltip-text {{ visibility: hidden; background-color: var(--cor-azul-escuro); color: #fff; text-align: center; border-radius: 8px; padding: 12px 16px; position: absolute; z-index: 10; bottom: 130%; left: 50%; transform: translateX(-50%); opacity: 0; transition: opacity 0.3s, bottom 0.3s; width: max-content; max-width: 250px; font-size: 13px; font-weight: 500; line-height: 1.4; box-shadow: 0px 5px 15px rgba(0,0,0,0.2); pointer-events: none; }}
             .tooltip-text::after {{ content: ""; position: absolute; top: 100%; left: 50%; margin-left: -6px; border-width: 6px; border-style: solid; border-color: var(--cor-azul-escuro) transparent transparent transparent; }}
@@ -277,26 +284,22 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
                 <strong style="color: var(--cor-azul-escuro);">{t['passo_a_passo']}</strong>
                 <ol style="margin-top: 10px;">{instr_html}</ol>
             </div>
-            
             <div class="toolbar">
-                <input type="text" id="input-busca" class="busca-input" placeholder="🔍 Buscar unidade...">
+                <input class="busca-input" id="input-busca" placeholder="🔍 Buscar...">
                 <div class="botoes-ordem">
-                    <button onclick="ordenarCards('nome')" class="btn-filtro">🔤 A-Z</button>
-                    <button onclick="ordenarCards('status')" class="btn-filtro">🟢 Status</button>
+                    <button class="btn-filtro" onclick="ordenarCards('nome')">A-Z</button>
+                    <button class="btn-filtro" onclick="ordenarCards('status')">Status</button>
                 </div>
             </div>
-
             <div id="lista-cards">
                 {cards_html}
             </div>
-            
             <div class="terminal">
                 <div id="status">{t['status_inicial']}</div>
                 <div id="otp">------</div>
             </div>
         </div>
-        <script>
-            // --- TOOLTIP ---
+    <script>
             window.addEventListener('DOMContentLoaded', () => {{
                 const wrappers = document.querySelectorAll('.tooltip-wrapper');
                 wrappers.forEach(wrapper => {{
@@ -305,20 +308,22 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
                     if (btn && tooltipText) {{
                         const ttl = parseInt(btn.getAttribute('data-ttl'));
                         const msgBase = btn.getAttribute('data-msg');
-                        
                         const tempoLiberacao = new Date(Date.now() + (ttl * 1000));
                         const horas = tempoLiberacao.getHours().toString().padStart(2, '0');
                         const minutos = tempoLiberacao.getMinutes().toString().padStart(2, '0');
-                        
                         tooltipText.innerText = msgBase + horas + ":" + minutos;
                     }}
                 }});
             }});
 
-            // --- MONITORAR OTP ---
             let poll;
             async function monitorar(email) {{
-                await fetch('/soft-lock?email=' + encodeURIComponent(email));
+                // FIX 8: Operação de escrita agora usa POST com body JSON
+                await fetch('/soft-lock', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{ email }})
+                }});
                 const terminal = document.querySelector('.terminal');
                 terminal.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
                 document.getElementById('status').innerText = "{t['status_lendo']}" + email;
@@ -339,27 +344,20 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
                         setTimeout(() => location.reload(), 5000); 
                     }}
                 }}, 3000);
-            }} 
+            }}
 
-            // --- SISTEMA DE BUSCA ---
             document.getElementById('input-busca').addEventListener('input', function(e) {{
                 const termo = e.target.value.toLowerCase();
                 const cards = document.querySelectorAll('.card-conta');
                 cards.forEach(card => {{
                     const nome = card.getAttribute('data-nome');
-                    if(nome.includes(termo)) {{
-                        card.style.display = 'flex';
-                    }} else {{
-                        card.style.display = 'none';
-                    }}
+                    card.style.display = nome.includes(termo) ? 'flex' : 'none';
                 }});
             }});
 
-            // --- SISTEMA DE ORDENAÇÃO ---
             function ordenarCards(criterio) {{
                 const containerLista = document.getElementById('lista-cards');
                 const cards = Array.from(containerLista.querySelectorAll('.card-conta'));
-                
                 cards.sort((a, b) => {{
                     if (criterio === 'nome') {{
                         return a.getAttribute('data-nome').localeCompare(b.getAttribute('data-nome'));
@@ -367,7 +365,6 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
                         return parseInt(b.getAttribute('data-status')) - parseInt(a.getAttribute('data-status'));
                     }}
                 }});
-                
                 containerLista.innerHTML = '';
                 cards.forEach(card => containerLista.appendChild(card));
             }}
@@ -376,9 +373,24 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
     </html>
     """
 
-@app.get("/soft-lock")
-async def soft_lock(email: str):
-    r.set(f"lock:{email.lower()}", "pendente", ex=900)
+# FIX 3 + FIX 8: Endpoint agora é POST e exige sessão autenticada
+class SoftLockData(BaseModel):
+    email: str
+
+@app.post("/soft-lock")
+async def soft_lock(data: SoftLockData, user_id: str = Cookie(None)):
+    # FIX 3: Rejeitar requisições sem sessão válida
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Não autenticado.")
+    
+    email_limpo = data.email.strip().lower()
+    
+    # FIX 3: Confirmar que o email pertence ao usuário logado antes de bloquear
+    check = supabase.table("contas_paciente").select("id").eq("email", email_limpo).eq("owner_id", user_id).execute()
+    if not check.data:
+        raise HTTPException(status_code=403, detail="Acesso negado a esta conta.")
+    
+    r.set(f"lock:{email_limpo}", "pendente", ex=900)
     return {"status": "ok"}
 
 @app.post("/webhook-sistema")
@@ -398,7 +410,7 @@ async def webhook_sistema(request: Request):
     email = data.get("user", {}).get("email", "").lower().strip()
     progresso = data.get("progresso", 0)
     if email and progresso > 0:
-        r.set(f"lock:{email}", "sucesso", ex=7200) # 2h Hard Lock
+        r.set(f"lock:{email}", "sucesso", ex=7200)
         print(f"🔒 [LOCK] Conta {email} travada por 2h.")
         return {"status": "locked", "message": "Sucesso"}
     return {"status": "ignored"}
@@ -414,6 +426,22 @@ async def get_otp(email: str, user_id: str = Cookie(None)):
 
 @app.post("/webhook-sendgrid")
 async def webhook_sendgrid(request: Request):
+    # FIX 9: Validar assinatura ECDSA antes de processar qualquer dado
+    if not SENDGRID_WEBHOOK_PUBLIC_KEY:
+        raise HTTPException(status_code=500, detail="Chave pública do webhook não configurada.")
+
+    signature = request.headers.get(EventWebhookHeader.SIGNATURE())
+    timestamp  = request.headers.get(EventWebhookHeader.TIMESTAMP())
+    raw_body   = await request.body()
+
+    ec_verifier = EventWebhook(SENDGRID_WEBHOOK_PUBLIC_KEY)
+    is_valid = ec_verifier.verify_signature(raw_body.decode("utf-8"), signature, timestamp)
+
+    if not is_valid:
+        # Requisição forjada — rejeitar sem processar
+        raise HTTPException(status_code=403, detail="Assinatura inválida.")
+
+    # Assinatura verificada — processar normalmente
     form = await request.form()
     email_html, email_to = form.get("html", ""), form.get("to", "").lower()
     match_to = re.search(r'[\w\.-]+@[\w\.-]+', email_to)
