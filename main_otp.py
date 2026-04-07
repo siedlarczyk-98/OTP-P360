@@ -1,11 +1,11 @@
 import os
 import re
-import redis
 import time
 from fastapi import FastAPI, Request, HTTPException, Cookie, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from supabase import create_client, Client
+import redis.asyncio as redis  # <-- MUDANÇA: Usando a versão assíncrona do Redis
 
 app = FastAPI()
 
@@ -20,11 +20,14 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 IS_PRODUCTION = os.getenv("ENV", "development") == "production"
 
 # Shared secret para autenticar o Inbound Parse do SendGrid
-# (o Inbound Parse não suporta ECDSA — autenticamos via query param na URL)
 SENDGRID_WEBHOOK_SECRET = os.getenv("SENDGRID_WEBHOOK_SECRET")
 
 # Domínio autorizado — apenas e-mails recebidos neste domínio serão processados
 ALLOWED_DOMAIN = "otp-p360.com.br"
+
+# --- CONFIGURAÇÕES DE COOLDOWN (Em Segundos) ---
+COOLDOWN_SOFT_LOCK = 300  # 5 minutos - Rastreamento pendente
+COOLDOWN_SISTEMA = 2700   # 45 minutos - Travado pelo sistema/uso
 
 class LoginData(BaseModel):
     email: str
@@ -51,6 +54,7 @@ TRADUCOES = {
         "status_inicial": "Aguardando rastreamento...",
         "status_lendo": "🔎 Rastreando e-mail para: ",
         "status_sucesso": "CÓDIGO LOCALIZADO! COPIE ABAIXO:",
+        "status_timeout": "⚠️ Tempo esgotado. Tente novamente.", # <-- MUDANÇA: Adicionado timeout
         "msg_vazio": "Nenhuma conta cadastrada para esta faculdade.",
         "logout": "Sair",
         "btn_ok": "Entrar",
@@ -58,7 +62,9 @@ TRADUCOES = {
         "placeholder_senha": "Senha",
         "status_disponivel": "🟢 Disponível",
         "status_em_uso": "🔴 Em uso",
-        "tooltip_bloqueio": "Esta licença está em uso por outro usuário - o uso será liberado às "
+        "tooltip_bloqueio": "Esta licença está em uso por outro usuário - o uso será liberado às ",
+        "btn_liberar": "🔓 Liberar", 
+        "msg_confirma_liberar": "Forçar liberação? Se alguém estiver usando, pode perder o acesso."
     },
     "en": {
         "titulo": "OTP Tracking Hub",
@@ -75,6 +81,7 @@ TRADUCOES = {
         "status_inicial": "Waiting for tracking...",
         "status_lendo": "🔎 Tracking email for: ",
         "status_sucesso": "CODE LOCATED! COPY BELOW:",
+        "status_timeout": "⚠️ Timeout. Please try again.",
         "msg_vazio": "No accounts registered for this college.",
         "logout": "Logout",
         "btn_ok": "Login",
@@ -82,7 +89,9 @@ TRADUCOES = {
         "placeholder_senha": "Password",
         "status_disponivel": "🟢 Available",
         "status_em_uso": "🔴 In Use",
-        "tooltip_bloqueio": "This license is in use by another user - it will be released at "
+        "tooltip_bloqueio": "This license is in use by another user - it will be released at ",
+        "btn_liberar": "🔓 Unlock",
+        "msg_confirma_liberar": "Force unlock? If someone is using it, they might lose access."
     },
     "es": {
         "titulo": "Centro de Rastreo OTP",
@@ -99,6 +108,7 @@ TRADUCOES = {
         "status_inicial": "Esperando rastreo...",
         "status_lendo": "🔎 Rastreando correo para: ",
         "status_sucesso": "¡CÓDIGO LOCALIZADO! COPIE ABAJO:",
+        "status_timeout": "⚠️ Tiempo agotado. Inténtalo de nuevo.",
         "msg_vazio": "No hay cuentas registradas para esta facultad.",
         "logout": "Salir",
         "btn_ok": "Ingresar",
@@ -106,7 +116,9 @@ TRADUCOES = {
         "placeholder_senha": "Contraseña",
         "status_disponivel": "🟢 Disponible",
         "status_em_uso": "🔴 En uso",
-        "tooltip_bloqueio": "Esta licencia está en uso por otro usuario - el acceso se liberará a las "
+        "tooltip_bloqueio": "Esta licencia está en uso por otro usuario - el acceso se liberará a las ",
+        "btn_liberar": "🔓 Liberar",
+        "msg_confirma_liberar": "¿Forzar liberación? Si alguien la está usando, puede perder el acceso."
     }
 }
 
@@ -170,7 +182,7 @@ async def auth_login(data: LoginData, response: Response):
         if res.user:
             uid   = res.user.id
             token = str(time.time())
-            r.set(f"active_session:{uid}", token, ex=86400)
+            await r.set(f"active_session:{uid}", token, ex=86400) # <-- MUDANÇA: await
             response.set_cookie(key="user_id",       value=uid,   httponly=True, max_age=86400, samesite="lax", secure=IS_PRODUCTION)
             response.set_cookie(key="session_token", value=token, httponly=True, max_age=86400, samesite="lax", secure=IS_PRODUCTION)
             return {"status": "ok"}
@@ -181,22 +193,33 @@ async def auth_login(data: LoginData, response: Response):
 # --- DASHBOARD ---
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request, user_id: str = Cookie(None), session_token: str = Cookie(None)):
-    if not user_id or r.get(f"active_session:{user_id}") != session_token:
+    active_session = await r.get(f"active_session:{user_id}") if user_id else None # <-- MUDANÇA: await
+    
+    if not user_id or active_session != session_token:
         res = RedirectResponse("/")
         res.delete_cookie("user_id")
         res.delete_cookie("session_token")
         return res
 
-    r.set(f"last_activity:{user_id}", int(time.time()), ex=86400)
+    await r.set(f"last_activity:{user_id}", int(time.time()), ex=86400) # <-- MUDANÇA: await
     lang   = get_idioma(request)
     t      = TRADUCOES[lang]
     contas = supabase.table("contas_paciente").select("*").eq("owner_id", user_id).execute()
 
     cards_html = ""
-    for c in contas.data:
+    
+    # <-- MUDANÇA: Resolvendo o problema N+1 com um Pipeline no Redis
+    if contas.data:
+        async with r.pipeline() as pipe:
+            for c in contas.data:
+                pipe.ttl(f"lock:{c.get('email')}")
+            ttls = await pipe.execute()
+    else:
+        ttls = []
+
+    for c, ttl in zip(contas.data, ttls):
         nome        = c.get('nome_amigavel') or 'Unidade'
         email_conta = c.get('email')
-        ttl         = r.ttl(f"lock:{email_conta}")
         status_sort = 1 if ttl <= 0 else 0
 
         if ttl > 0:
@@ -204,10 +227,10 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
             status_cor = "#d93025"
             btn_html   = f"""
             <div class="tooltip-wrapper">
-                <button class="btn-lock" style="background:#ccc; cursor:help;" disabled data-ttl="{ttl}" data-msg="{t['tooltip_bloqueio']}">
-                    {t['btn_bloqueado']} ({ttl//60}m)
+                <button class="btn-lock" style="background:#d93025; cursor:pointer;" onclick="liberar('{email_conta}')">
+                    {t['btn_liberar']} ({ttl//60}m)
                 </button>
-                <span class="tooltip-text">Calculando...</span>
+                <span class="tooltip-text">{t['tooltip_bloqueio']}</span>
             </div>
             """
         else:
@@ -298,7 +321,19 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
                     }}
                 }});
             }});
-
+            
+            async function liberar(email) {{
+                if (!confirm("{t['msg_confirma_liberar']}")) return;
+                
+                await fetch('/unlock', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{ email }})
+                }});
+                
+                location.reload();
+            }}    
+            
             let poll;
             async function monitorar(email) {{
                 await fetch('/soft-lock', {{
@@ -306,21 +341,42 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
                     headers: {{'Content-Type': 'application/json'}},
                     body: JSON.stringify({{ email }})
                 }});
+                
                 document.querySelector('.terminal').scrollIntoView({{ behavior: 'smooth', block: 'center' }});
                 document.getElementById('status').innerText = "{t['status_lendo']}" + email;
+                
                 const otpElem = document.getElementById('otp');
                 otpElem.innerText = '......';
+                otpElem.style.color = 'white'; // Reseta a cor caso seja uma nova tentativa
                 otpElem.classList.add('lendo');
+                
                 if (poll) clearInterval(poll);
+                
+                let tentativas = 0;
+                const maxTentativas = 60; // <-- MUDANÇA: Limite de 3 minutos (60 x 3s)
+                
                 poll = setInterval(async () => {{
+                    tentativas++;
+                    
+                    if (tentativas > maxTentativas) {{
+                        clearInterval(poll);
+                        otpElem.classList.remove('lendo');
+                        otpElem.innerText = 'FALHA';
+                        otpElem.style.color = '#d93025';
+                        document.getElementById('status').innerText = "{t['status_timeout']}";
+                        setTimeout(() => location.reload(), 3000);
+                        return;
+                    }}
+
                     const res  = await fetch('/get-raw-otp?email=' + encodeURIComponent(email));
                     const data = await res.json();
+                    
                     if (data && data.otp) {{
+                        clearInterval(poll);
                         otpElem.classList.remove('lendo');
                         otpElem.innerText = data.otp;
                         otpElem.style.color = 'var(--cor-verde-menta)';
                         document.getElementById('status').innerText = "{t['status_sucesso']}";
-                        clearInterval(poll);
                         setTimeout(() => location.reload(), 5000);
                     }}
                 }}, 3000);
@@ -359,7 +415,25 @@ async def soft_lock(data: SoftLockData, user_id: str = Cookie(None)):
     check = supabase.table("contas_paciente").select("id").eq("email", email_limpo).eq("owner_id", user_id).execute()
     if not check.data:
         raise HTTPException(status_code=403, detail="Acesso negado a esta conta.")
-    r.set(f"lock:{email_limpo}", "pendente", ex=900)
+    
+    await r.set(f"lock:{email_limpo}", "pendente", ex=COOLDOWN_SOFT_LOCK) # <-- MUDANÇA: await
+    return {"status": "ok"}
+
+class UnlockData(BaseModel):
+    email: str
+
+@app.post("/unlock")
+async def unlock_conta(data: UnlockData, user_id: str = Cookie(None)):
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Não autenticado.")
+    
+    email_limpo = data.email.strip().lower()
+    
+    check = supabase.table("contas_paciente").select("id").eq("email", email_limpo).eq("owner_id", user_id).execute()
+    if not check.data:
+        raise HTTPException(status_code=403, detail="Acesso negado a esta conta.")
+    
+    await r.delete(f"lock:{email_limpo}") # <-- MUDANÇA: await
     return {"status": "ok"}
 
 # --- WEBHOOK SISTEMA (parceiro externo) ---
@@ -377,11 +451,13 @@ async def webhook_sistema(request: Request):
     check = supabase.table("api_keys").select("id").eq("client_id", client_id).eq("client_key", client_key).execute()
     if not check.data:
         raise HTTPException(status_code=403, detail="Acesso Negado.")
+    
     email     = data.get("user", {}).get("email", "").lower().strip()
     progresso = data.get("progresso", 0)
+    
     if email and progresso > 0:
-        r.set(f"lock:{email}", "sucesso", ex=7200)
-        print(f"🔒 [LOCK] Conta {email} travada por 2h.")
+        await r.set(f"lock:{email}", "sucesso", ex=COOLDOWN_SISTEMA) # <-- MUDANÇA: await
+        print(f"🔒 [LOCK] Conta {email} travada por 45min.")
         return {"status": "locked", "message": "Sucesso"}
     return {"status": "ignored"}
 
@@ -393,15 +469,13 @@ async def get_otp(email: str, user_id: str = Cookie(None)):
     email_limpo = email.strip().lower()
     check = supabase.table("contas_paciente").select("id").eq("email", email_limpo).eq("owner_id", user_id).execute()
     if check.data:
-        return {"otp": r.get(f"otp:{email_limpo}")}
+        otp = await r.get(f"otp:{email_limpo}") # <-- MUDANÇA: await
+        return {"otp": otp}
     return {"otp": None}
 
 # --- WEBHOOK SENDGRID (Inbound Parse) ---
 @app.post("/webhook-sendgrid")
 async def webhook_sendgrid(request: Request):
-    # Autenticação via shared secret no query param
-    # Configure a Destination URL no painel do SendGrid como:
-    # https://seu-dominio.app/webhook-sendgrid?secret=VALOR_DO_ENV
     secret = request.query_params.get("secret", "")
     if not SENDGRID_WEBHOOK_SECRET or secret != SENDGRID_WEBHOOK_SECRET:
         print("[WEBHOOK] Tentativa de acesso com secret inválido.")
@@ -411,11 +485,6 @@ async def webhook_sendgrid(request: Request):
     email_to   = form.get("to", "").lower().strip()
     email_html = form.get("html", "")
 
-    # DEBUG TEMPORÁRIO — remover após confirmar funcionamento
-    print(f"[WEBHOOK DEBUG] to={email_to}")
-    print(f"[WEBHOOK DEBUG] html_snippet={email_html[:500]}")
-
-    # Extrai o endereço de destino do campo "to"
     match_to = re.search(r'[\w\.-]+@[\w\.-]+', email_to)
     if not match_to:
         print(f"[WEBHOOK] Campo 'to' inválido ou ausente: '{email_to}'")
@@ -423,16 +492,18 @@ async def webhook_sendgrid(request: Request):
 
     alvo = match_to.group(0).strip().lower()
 
-    # Rejeita qualquer e-mail fora do domínio autorizado
     if not alvo.endswith(f"@{ALLOWED_DOMAIN}"):
         print(f"[WEBHOOK] Domínio não autorizado ignorado: {alvo}")
         return {"status": "ignored", "reason": "domínio não autorizado"}
 
-    otp_match  = re.search(r'color:#191847;">(\d{6})</p>', email_html)
+    # <-- MUDANÇA: Regex mais seguro e flexível. 
+    # Agora busca 6 dígitos rodeados por espaços ou tags comuns, 
+    # evitando que quebre se a plataforma mudar a cor ou a fonte da formatação do email.
+    otp_match  = re.search(r'>\s*(\d{6})\s*</(?:p|span|b|strong|div|font)>', email_html, re.IGNORECASE)
     otp        = otp_match.group(1) if otp_match else None
 
     if otp:
-        r.set(f"otp:{alvo}", otp, ex=300)
+        await r.set(f"otp:{alvo}", otp, ex=300) # <-- MUDANÇA: await
         print(f"[OTP] ✅ Código {otp} capturado para {alvo}")
     else:
         print(f"[OTP] ⚠️ Nenhum OTP encontrado no e-mail para {alvo}")
@@ -441,7 +512,14 @@ async def webhook_sendgrid(request: Request):
 
 # --- LOGOUT ---
 @app.get("/logout")
-async def logout(response: Response):
+async def logout(response: Response, user_id: str = Cookie(None)):
+    if user_id:
+        try:
+            # <-- MUDANÇA: Limpa ativamente a sessão do Redis no logout
+            await r.delete(f"active_session:{user_id}")
+        except Exception as e:
+            print(f"[LOGOUT ERROR] {e}")
+
     response.delete_cookie("user_id")
     response.delete_cookie("session_token")
     return RedirectResponse("/")
