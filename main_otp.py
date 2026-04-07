@@ -227,7 +227,7 @@ async def dashboard(request: Request, user_id: str = Cookie(None), session_token
             status_cor = "#d93025"
             btn_html   = f"""
             <div class="tooltip-wrapper">
-                <button class="btn-lock" style="background:#d93025; cursor:pointer;" onclick="liberar('{email_conta}')">
+                <button class="btn-lock" style="background:#d93025; cursor:pointer;" onclick="liberar('{email_conta}')" data-ttl="{ttl}" data-msg="{t['tooltip_bloqueio']}">
                     {t['btn_liberar']} ({ttl//60}m)
                 </button>
                 <span class="tooltip-text">{t['tooltip_bloqueio']}</span>
